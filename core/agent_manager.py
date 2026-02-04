@@ -64,6 +64,12 @@ class AgentManager:
                 # 从队列获取消息
                 message_data = await queue.get()
 
+                # 检查 Agent 是否被禁用
+                if hasattr(agent, 'enabled') and not agent.enabled:
+                    logger.debug(f"[{agent.agent_name}] 已禁用，跳过消息处理")
+                    queue.task_done()
+                    continue
+
                 # 记录开始时间
                 start_time = time.time()
 
@@ -79,6 +85,7 @@ class AgentManager:
                     agent.stats["total_processed"] = agent.stats.get("total_processed", 0) + 1
                     agent.stats["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     agent.stats["total_time"] = agent.stats.get("total_time", 0.0) + processing_time
+                    logger.debug(f"[{agent.agent_name}] 统计已更新: total_processed={agent.stats['total_processed']}, total_time={agent.stats['total_time']:.2f}s")
 
                 # 记录结果
                 if result:

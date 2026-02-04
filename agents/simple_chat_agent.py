@@ -7,8 +7,10 @@ from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from loguru import logger
 from utils.message_logger import log_agent_processing, log_agent_response, log_message_sent
+from core.agent_factory import AgentFactory
 
 
+@AgentFactory.register("SimpleChatAgent")
 class SimpleChatAgent:
     """简单的聊天 Agent，使用 LangGraph 管理对话状态"""
 
@@ -176,7 +178,6 @@ class SimpleChatAgent:
 
             # 提取并清理消息文本
             raw_message = message_data.get("message", "")
-            message_text = self._extract_message_text(message_data)
             clean_text = self._clean_message(str(raw_message))
 
             # 记录 Agent 开始处理

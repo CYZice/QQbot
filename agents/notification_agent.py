@@ -7,6 +7,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.graph import StateGraph, START, END
 from loguru import logger
 from utils.message_logger import log_agent_processing, log_private_message_sent
+from core.agent_factory import AgentFactory
 
 
 # 定义通知分析结果的 Pydantic 模型
@@ -43,6 +44,7 @@ class NotificationState(TypedDict):
     key_info: str  # 关键信息
 
 
+@AgentFactory.register("NotificationAgent")
 class NotificationAgent:
     """通知摘要 Agent - 使用 LangGraph 识别重要通知并发送摘要"""
 
