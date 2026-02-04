@@ -36,10 +36,10 @@ class MessageHandler:
             # 提取消息信息
             group_id = message_data.get("group_id")
             user_id = message_data.get("user_id")
-            raw_message = message_data.get("message", "")
             sender_name = message_data.get("sender", {}).get("nickname", "未知")
 
-            # 清理消息文本
+            # 提取并清理消息文本
+            raw_message = self.message_filter._extract_message_text(message_data)
             clean_text = self.message_filter.clean_message(raw_message)
 
             if not clean_text:

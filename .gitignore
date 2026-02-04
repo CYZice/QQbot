@@ -1,3 +1,7 @@
 .vscode
 .claude
 .env
+__pycache__/
+**/__pycache__/
+
+logs/bot.log

@@ -22,6 +22,12 @@ class NapCatClient:
         self.bot_qq: Optional[int] = None
         self.connected = False
 
+        # API 响应队列（用于匹配 echo）
+        self.api_responses: Dict[str, asyncio.Future] = {}
+
+        # 消息接收任务
+        self.receive_task: Optional[asyncio.Task] = None
+
     async def connect(self) -> bool:
         """
         连接到 NapCat WebSocket 服务器
@@ -35,6 +41,12 @@ class NapCatClient:
             self.connected = True
             logger.success("WebSocket 连接成功")
 
+            # 启动消息接收任务
+            self.receive_task = asyncio.create_task(self._receive_messages())
+
+            # 等待一下让接收任务启动
+            await asyncio.sleep(0.1)
+
             # 获取 bot 的 QQ 号
             await self._fetch_bot_qq()
 
@@ -43,6 +55,38 @@ class NapCatClient:
             logger.error(f"WebSocket 连接失败: {e}")
             self.connected = False
             return False
+
+    async def _receive_messages(self):
+        """后台接收消息任务"""
+        try:
+            async for message in self.websocket:
+                try:
+                    data = json.loads(message)
+                    logger.debug(f"收到消息: {data}")
+
+                    # 如果是 API 响应（包含 echo 字段）
+                    if "echo" in data:
+                        echo = data["echo"]
+                        if echo in self.api_responses:
+                            # 将响应传递给等待的 Future
+                            self.api_responses[echo].set_result(data)
+                    # 如果是事件消息（包含 post_type）
+                    elif "post_type" in data:
+                        # 事件消息会在 listen() 中处理
+                        if hasattr(self, '_event_queue'):
+                            await self._event_queue.put(data)
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON 解析失败: {e}")
+                except Exception as e:
+                    logger.error(f"处理消息异常: {e}")
+
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("WebSocket 连接已关闭")
+            self.connected = False
+        except Exception as e:
+            logger.error(f"接收消息异常: {e}")
+            self.connected = False
 
     async def _fetch_bot_qq(self):
         """获取 bot 的 QQ 号"""
@@ -72,36 +116,44 @@ class NapCatClient:
             return None
 
         try:
+            # 生成唯一的 echo
+            echo = f"{action}_{asyncio.get_event_loop().time()}"
+
+            # 创建 Future 用于等待响应
+            future = asyncio.Future()
+            self.api_responses[echo] = future
+
             # 构造请求
             request = {
                 "action": action,
                 "params": params or {},
-                "echo": f"{action}_{asyncio.get_event_loop().time()}"
+                "echo": echo
             }
 
             # 发送请求
             await self.websocket.send(json.dumps(request))
             logger.debug(f"发送 API 请求: {action}")
 
-            # 等待响应
-            # 注意：这里简化处理，实际应该根据 echo 匹配响应
-            response_text = await asyncio.wait_for(self.websocket.recv(), timeout=5.0)
-            response = json.loads(response_text)
+            # 等待响应（最多 10 秒）
+            try:
+                response = await asyncio.wait_for(future, timeout=10.0)
+            finally:
+                # 清理
+                if echo in self.api_responses:
+                    del self.api_responses[echo]
 
-            # 检查是否是 API 响应（包含 echo 字段）
-            if "echo" in response and response.get("status") == "ok":
+            # 检查响应状态
+            if response.get("status") == "ok":
                 logger.debug(f"API 响应成功: {action}")
                 return response.get("data")
-            elif "echo" in response:
+            else:
                 logger.error(f"API 响应失败: {response}")
                 return None
 
-            # 如果不是 API 响应，可能是事件消息，需要继续等待
-            # 这里简化处理，实际应该用队列管理
-            return None
-
         except asyncio.TimeoutError:
             logger.error(f"API 调用超时: {action}")
+            if echo in self.api_responses:
+                del self.api_responses[echo]
             return None
         except Exception as e:
             logger.error(f"API 调用失败: {action}, 错误: {e}")
@@ -148,32 +200,38 @@ class NapCatClient:
 
         logger.info("开始监听消息...")
 
+        # 创建事件队列
+        self._event_queue = asyncio.Queue()
+
         try:
-            async for message in self.websocket:
+            while self.connected:
+                # 从队列中获取事件
                 try:
-                    data = json.loads(message)
+                    event = await asyncio.wait_for(self._event_queue.get(), timeout=1.0)
+                    yield event
+                except asyncio.TimeoutError:
+                    # 超时继续循环
+                    continue
 
-                    # 过滤掉 API 响应，只处理事件消息
-                    if "post_type" in data:
-                        yield data
-
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON 解析失败: {e}")
-                except Exception as e:
-                    logger.error(f"处理消息异常: {e}")
-
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("WebSocket 连接已关闭")
-            self.connected = False
         except Exception as e:
             logger.error(f"监听消息异常: {e}")
             self.connected = False
 
     async def close(self):
         """关闭 WebSocket 连接"""
+        self.connected = False
+
+        # 取消接收任务
+        if self.receive_task:
+            self.receive_task.cancel()
+            try:
+                await self.receive_task
+            except asyncio.CancelledError:
+                pass
+
+        # 关闭 WebSocket
         if self.websocket:
             await self.websocket.close()
-            self.connected = False
             logger.info("WebSocket 连接已关闭")
 
     async def reconnect(self, max_retries: int = 5, delay: int = 5) -> bool:

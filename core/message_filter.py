@@ -45,19 +45,52 @@ class MessageFilter:
         if message_data.get("user_id") == self.bot_qq:
             return False
 
-        message_text = message_data.get("message", "")
+        # 获取消息文本（可能是字符串或列表）
+        message_text = self._extract_message_text(message_data)
 
         # 检查是否 @ 了 bot
         if self.is_at_bot(message_text):
-            logger.info(f"检测到 @ bot: {message_text[:50]}")
+            logger.info(f"检测到 @ bot: {message_text[:50] if len(message_text) > 50 else message_text}")
             return True
 
         # 检查是否包含唤醒词
         if self.has_wake_word(message_text):
-            logger.info(f"检测到唤醒词: {message_text[:50]}")
+            logger.info(f"检测到唤醒词: {message_text[:50] if len(message_text) > 50 else message_text}")
             return True
 
         return False
+
+    def _extract_message_text(self, message_data: Dict[str, Any]) -> str:
+        """
+        从消息数据中提取文本
+
+        Args:
+            message_data: 消息数据
+
+        Returns:
+            消息文本字符串
+        """
+        message = message_data.get("message", "")
+
+        # 如果是字符串，直接返回
+        if isinstance(message, str):
+            return message
+
+        # 如果是列表（消息段数组），提取文本
+        if isinstance(message, list):
+            text_parts = []
+            for segment in message:
+                if isinstance(segment, dict):
+                    # 文本类型
+                    if segment.get("type") == "text":
+                        text_parts.append(segment.get("data", {}).get("text", ""))
+                    # at 类型
+                    elif segment.get("type") == "at":
+                        qq = segment.get("data", {}).get("qq", "")
+                        text_parts.append(f"[CQ:at,qq={qq}]")
+            return "".join(text_parts)
+
+        return ""
 
     def is_at_bot(self, message_text: str) -> bool:
         """
