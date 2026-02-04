@@ -86,10 +86,16 @@ class NotificationAgent:
         # 统计信息
         self.stats = {
             "total_processed": 0,
+            "total_time": 0.0,
+            "last_run": None,
+            "success": 0,
+            "errors": 0,
             "important_notifications": 0,
-            "sent_summaries": 0,
-            "errors": 0
+            "sent_summaries": 0
         }
+
+        # 启用/禁用标志
+        self.enabled = config.get("enabled", True)
 
         logger.info(f"NotificationAgent 初始化完成: {self.agent_name}")
 

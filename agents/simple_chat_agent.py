@@ -56,9 +56,14 @@ class SimpleChatAgent:
         # 统计信息
         self.stats = {
             "total_processed": 0,
+            "total_time": 0.0,
+            "last_run": None,
             "success": 0,
             "errors": 0
         }
+
+        # 启用/禁用标志
+        self.enabled = config.get("enabled", True)
 
         logger.info(f"SimpleChatAgent 初始化完成: {self.agent_name}, 模型: {self.model}")
         logger.debug(f"系统提示词: {self.system_prompt[:50]}...")
@@ -172,7 +177,7 @@ class SimpleChatAgent:
             # 提取并清理消息文本
             raw_message = message_data.get("message", "")
             message_text = self._extract_message_text(message_data)
-            clean_text = self._clean_message(message_text, str(raw_message))
+            clean_text = self._clean_message(str(raw_message))
 
             # 记录 Agent 开始处理
             log_agent_processing(group_id, user_id, clean_text, self.agent_name)
@@ -242,7 +247,7 @@ class SimpleChatAgent:
 
         return ""
 
-    def _clean_message(self, message_text: str, raw_message: str) -> str:
+    def _clean_message(self, raw_message: str) -> str:
         """清理消息，移除 @ 和 CQ 码"""
         # 移除 @ 相关的 CQ 码
         text = re.sub(r'\[CQ:at,qq=\d+\]', '', raw_message)

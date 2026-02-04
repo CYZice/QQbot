@@ -76,10 +76,9 @@ class AgentManager:
 
                 # 更新统计信息
                 if hasattr(agent, 'stats'):
+                    agent.stats["total_processed"] = agent.stats.get("total_processed", 0) + 1
                     agent.stats["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    if "total_time" not in agent.stats:
-                        agent.stats["total_time"] = 0.0
-                    agent.stats["total_time"] += processing_time
+                    agent.stats["total_time"] = agent.stats.get("total_time", 0.0) + processing_time
 
                 # 记录结果
                 if result:
