@@ -1,4 +1,4 @@
-import asyncio,heapq,re
+import asyncio,heapq,os,re
 from enum import IntEnum
 from ncatbot.core import GroupMessage
 from time import time
@@ -39,21 +39,27 @@ class MessageScheduler:#异步优先级任务调度器
         self._lock = asyncio.Lock()  # 保证并发安全
         self._not_empty = asyncio.Condition(self._lock)  # 非空条件变量
         self._not_full = asyncio.Condition(self._lock)   # 非满条件变量
+        
+    async def RTpush(self, msg: GroupMessage, type: TaskType): #添加实时任务，返回是否成功
+        task = PriorityTask(msg, TaskPriority.REALTIME, type)
+        try:
+            await self._put(task)
+        except asyncio.QueueFull:
+            logging.warning(f"队列满，丢弃实时任务: {type.name}")
+
+    async def push(self, msg: GroupMessage, type: TaskType): #添加普通任务，返回是否成功
+        task = PriorityTask(msg, TaskPriority.NORMAL, type)
+        try:
+            await self._put(task)
+        except asyncio.QueueFull:
+            logging.debug(f"队列满，丢弃普通任务: {type.name}")  # 普通任务用 debug 级别
     
-    async def RTpush(self, msg: GroupMessage,type: TaskType) -> None:#添加实时任务（最高优先级）
-        task = PriorityTask(msg, TaskPriority.REALTIME,type)
-        await self._put(task)
-    
-    async def push(self, msg: GroupMessage,type: TaskType) -> None:#添加普通任务
-        task = PriorityTask(msg, TaskPriority.NORMAL,type)
-        await self._put(task)
-    
-    async def _put(self, task: PriorityTask) -> None:#内部方法：插入任务到优先队列
-        async with self._not_full:# 如果队列已满，等待
-            while self.maxsize > 0 and len(self._queue) >= self.maxsize:
-                await self._not_full.wait()
-            heapq.heappush(self._queue, task)  # 插入任务并保持优先级顺序 O(log n)
-            self._not_empty.notify() # 通知等待的 pop 操作
+    async def _put(self, task: PriorityTask) -> None:
+        async with self._not_empty:
+            if self.maxsize > 0 and len(self._queue) >= self.maxsize:
+                raise asyncio.QueueFull()
+            heapq.heappush(self._queue, task)
+            self._not_empty.notify()
     
     async def pop(self) -> PriorityTask:  #弹出最高优先级任务（实时任务优先于普通任务）
         async with self._not_empty:# 如果队列为空，等待
@@ -110,6 +116,8 @@ def clean_message(raw_message):
 
 scheduler = MessageScheduler(maxsize=100)
 
+
+_file_lock = asyncio.Lock()
 async def processmsg(msg: GroupMessage):
     msg.raw_message=clean_message(msg.raw_message)
     if msg.group_id not in allowed_id:#不在范围内
@@ -119,21 +127,38 @@ async def processmsg(msg: GroupMessage):
     elif any(keyword in msg.raw_message for keyword in normal_keywords):#IDLE
         await scheduler.push(msg,TaskType.FROWARD)
     else:
-        with open('today.log', 'a', encoding='utf-8') as f:
-            f.write(f"{msg.group_id}:{msg.raw_message}\n")
-            f.flush()
-        
+        async with _file_lock:
+            await asyncio.to_thread(  # 在线程池中执行，避免阻塞事件循环
+                _write_log, msg.group_id, msg.raw_message
+            )
+
+def _write_log(group_id: str, message: str):
+    """同步写入日志的辅助函数"""
+    with open('today.log', 'a', encoding='utf-8') as f:
+        f.write(f"{group_id}:{message}\n")
+        f.flush()
+
+
 async def daily_summary():
     file_path = 'today.log'
+    temp_path = 'today.log.processing'
     print(f"开始读取日志: {file_path}")
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            while True: #每次读取 10K 字符
+        async with _file_lock: #使用锁替换 防止遗漏信息
+            try:
+                await asyncio.to_thread(os.rename, file_path, temp_path)
+            except FileNotFoundError:
+                print("没有日志需要处理")
+                return
+        with open(temp_path, 'r', encoding='utf-8') as f:
+            while True:
                 chunk = f.read(10000)
                 if not chunk:
                     break
-                msg = GroupMessage()
+                msg = GroupMessage()  # type: ignore
                 msg.raw_message = chunk
-                await scheduler.push(msg,TaskType.SUMMARY)
-    except FileNotFoundError:
-        print(f"文件 {file_path} 不存在")
+                await scheduler.push(msg, TaskType.SUMMARY)
+        await asyncio.to_thread(os.remove, temp_path)
+        print("日志处理完成")
+    except Exception as e:
+        print(f"处理日志时出错: {e}")
