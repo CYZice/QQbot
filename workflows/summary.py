@@ -177,8 +177,18 @@ class SummaryFinalResult:
     chunk_count: int = 0
     message_count: int = 0
     sources: list[str] = field(default_factory=list)
+    trace_lines: list[str] = field(default_factory=list)
     map_results: list[SummaryMapResult] = field(default_factory=list)
     elapsed_ms: float = 0.0
+
+
+@dataclass
+class SourceAnalysis:
+    """来源分析结果，集中供 map/finalize/format 复用。"""
+
+    source_refs: list[str]
+    source_details: list[str]
+    trace_lines: list[str]
 
 
 class ChunkSummarySchema(BaseModel):
@@ -290,7 +300,9 @@ def format_summary_message(result: SummaryFinalResult) -> str:
     highlights = _safe_list(result.highlights, max_items=6)
     risks = _safe_list(result.risks, max_items=5)
     todos = _safe_list(result.todos, max_items=5)
-    trace_lines = _build_trace_lines(result)
+    trace_lines = _safe_list(result.trace_lines, max_items=20)
+    if not trace_lines and result.sources:
+        trace_lines = [f"来源标识：{', '.join(result.sources)}"]
 
     highlight_text = "\n".join(f"- {item}" for item in highlights) or "- （暂无）"
     risk_text = "\n".join(f"- {item}" for item in risks) or "- （暂无）"
@@ -332,14 +344,7 @@ def _build_summary_graph(*, model_name: str | None, temperature: float):
             return {"map_result": empty_result, "llm_calls": state["llm_calls"]}
 
         structured_llm = llm.with_structured_output(ChunkSummarySchema)
-        source_refs = sorted(
-            {
-                f"{block.group_id}|{block.user_id}"
-                for block in payload.blocks
-                if block.group_id or block.user_id
-            }
-        )
-        source_detail_lines = _build_source_details(payload.blocks)
+        source_analysis = _analyze_blocks(payload.blocks)
         messages = [
             SystemMessage(
                 content=SYSTEM_SUMMARY_PROMPT
@@ -347,9 +352,9 @@ def _build_summary_graph(*, model_name: str | None, temperature: float):
             HumanMessage(
                 content=USER_SUMMARY_PROMPT_TEMPLATE.format(
                     chunk_index=chunk_index,
-                    source_count=len(source_refs),
-                    sources=", ".join(source_refs) if source_refs else "(none)",
-                    source_details="\n".join(source_detail_lines) if source_detail_lines else "(none)",
+                    source_count=len(source_analysis.source_refs),
+                    sources=", ".join(source_analysis.source_refs) if source_analysis.source_refs else "(none)",
+                    source_details="\n".join(source_analysis.source_details) if source_analysis.source_details else "(none)",
                     unique_lines=payload.stats.get("unique_lines", 0),
                     payload_text=payload.text,
                 )
@@ -378,11 +383,7 @@ def _build_summary_graph(*, model_name: str | None, temperature: float):
                 overview="今日暂无可总结内容。",
             )
 
-        source_set = {
-            f"{block.group_id}|{block.user_id}"
-            for block in payload.blocks
-            if block.group_id or block.user_id
-        }
+        source_analysis = _analyze_blocks(payload.blocks)
         final_result = SummaryFinalResult(
             date=datetime.now().strftime("%Y-%m-%d"),
             overview=map_result.overview,
@@ -391,7 +392,8 @@ def _build_summary_graph(*, model_name: str | None, temperature: float):
             todos=map_result.todos,
             chunk_count=1,
             message_count=int(payload.stats.get("unique_lines", 0)),
-            sources=sorted(source_set),
+            sources=source_analysis.source_refs,
+            trace_lines=source_analysis.trace_lines,
             map_results=[map_result],
         )
         return {"final_result": final_result}
@@ -566,47 +568,42 @@ def _build_stats(chunk: SummaryChunk) -> dict[str, float | int]:
     }
 
 
-def _build_source_details(blocks: list[SummaryBlock]) -> list[str]:
-    details: list[str] = []
-    for block in blocks:
-        details.append(
-            f"- group={block.group_id}, user={block.user_id}, name={block.user_name}, lines={len(block.lines)}"
-        )
-    return details
-
-
-def _build_trace_lines(result: SummaryFinalResult) -> list[str]:
-    """构建“溯源”文本：按群聚合来源、昵称与时间范围。"""
+def _analyze_blocks(blocks: list[SummaryBlock]) -> SourceAnalysis:
+    """单次遍历 blocks，统一生成来源引用/细节/溯源文案。"""
+    source_ref_set: set[str] = set()
+    source_details: list[str] = []
     group_summary: dict[str, dict[str, Any]] = {}
 
-    for map_result in result.map_results:
-        for block in map_result.blocks:
-            group_id = block.group_id or UNKNOWN_GROUP
-            group_entry = group_summary.setdefault(
-                group_id,
-                {
-                    "senders": set(),
-                    "times": [],
-                    "message_count": 0,
-                },
-            )
+    for block in blocks:
+        group_id = block.group_id or UNKNOWN_GROUP
+        user_id = block.user_id or UNKNOWN_USER
+        user_name = (block.user_name or "").strip() or user_id
 
-            user_name = (block.user_name or "").strip() or block.user_id or UNKNOWN_USER
-            sender_ref = f"{user_name}({block.user_id})" if block.user_id else user_name
-            group_entry["senders"].add(sender_ref)
+        source_ref_set.add(f"{group_id}|{user_id}")
+        source_details.append(
+            f"- group={group_id}, user={user_id}, name={user_name}, lines={len(block.lines)}"
+        )
 
-            for line in block.lines:
-                cleaned = line.strip()
-                if not cleaned:
-                    continue
-                group_entry["message_count"] += 1
+        group_entry = group_summary.setdefault(
+            group_id,
+            {
+                "senders": set(),
+                "times": [],
+                "message_count": 0,
+            },
+        )
+        sender_ref = f"{user_name}({user_id})" if user_id else user_name
+        group_entry["senders"].add(sender_ref)
 
-                hhmm = _extract_hhmm(cleaned)
-                if hhmm:
-                    group_entry["times"].append(hhmm)
+        for line in block.lines:
+            cleaned = line.strip()
+            if not cleaned:
+                continue
+            group_entry["message_count"] += 1
 
-    if not group_summary and result.sources:
-        return [f"来源标识：{', '.join(result.sources)}"]
+            hhmm = _extract_hhmm(cleaned)
+            if hhmm:
+                group_entry["times"].append(hhmm)
 
     trace_lines: list[str] = []
     for group_id in sorted(group_summary.keys()):
@@ -617,7 +614,15 @@ def _build_trace_lines(result: SummaryFinalResult) -> list[str]:
             f"{group_id}群主要说了 {entry['message_count']} 条消息，来自 {sender_text}，发送时间为{time_text}"
         )
 
-    return trace_lines
+    source_refs = sorted(source_ref_set)
+    if not trace_lines and source_refs:
+        trace_lines = [f"来源标识：{', '.join(source_refs)}"]
+
+    return SourceAnalysis(
+        source_refs=source_refs,
+        source_details=source_details,
+        trace_lines=trace_lines,
+    )
 
 
 def _extract_hhmm(line: str) -> str:
