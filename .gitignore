@@ -12,9 +12,5 @@ plugins
 bot.py
 config.yaml
 
+today.log
 logs/message_handler.log
-
-
-config.yaml
-
-bot.py
