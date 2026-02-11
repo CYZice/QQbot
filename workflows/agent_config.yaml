@@ -43,6 +43,11 @@ summary_config:
     # single_message: 合并为一条消息发送
     # multi_message: 先发总览，再按群逐条发送
 
+    summary_group_reduce_enabled: true
+    # summary_group_reduce_enabled：是否启用“每群多 chunk 的二次 LLM reduce”
+    # true: 启用（质量更高，会增加 LLM 调用）
+    # false: 关闭（走本地去重合并，成本更低）
+
 forward_config:
   file_name: forward.py
   config:
@@ -79,6 +84,22 @@ auto_reply_config:
   config:
     model: qwen3-max-2026-01-23
     temperature: 0.4
+    # context_history_limit：最多携带多少条历史上下文
+    context_history_limit: 12
+    # context_max_chars：历史上下文总字符上限（超过后截断）
+    context_max_chars: 1800
+    # context_window_seconds：只读取最近 N 秒的历史消息作为上下文
+    context_window_seconds: 1800
+    # min_reply_interval_seconds：同一会话两次自动回复的最小间隔（冷却）
+    min_reply_interval_seconds: 20
+    # flush_check_interval_seconds：pending 扫描周期，单位秒
+    flush_check_interval_seconds: 10
+    # pending_expire_seconds：pending 最长保留时长，超时后丢弃
+    pending_expire_seconds: 3600
+    # bypass_cooldown_when_at_bot：群聊里 @bot 时是否跳过冷却立即触发
+    bypass_cooldown_when_at_bot: false
+    # pending_max_messages：冷却期间每会话最多累计的待处理消息数
+    pending_max_messages: 50
 
     # rules：自动回复规则列表（每个元素对应一个群聊或私聊目标）
     # 你可以按需添加多个规则，逐条匹配。
