@@ -16,7 +16,7 @@
 summary_config:
   file_name: summary.py
   config:
-    model: gpt-4o-mini
+    model: qwen3-max-2026-01-23
     max_line_chars: 300
     max_lines: 500
     temperature: 0.2
@@ -28,7 +28,7 @@ summary_config:
 forward_config:
   file_name: forward.py
   config:
-    model: gpt-4o-mini
+    model: qwen3-max-2026-01-23
     temperature: 0.0
     monitor_group_qq_number:
     # monitor_group_qq_number： 监视需要转发消息的群里（一般是重要通知群）
@@ -59,7 +59,7 @@ forward_config:
 auto_reply_config:
   file_name: auto_reply.py
   config:
-    model: gpt-4o-mini
+    model: qwen3-max-2026-01-23
     temperature: 0.2
 
     # rules：自动回复规则列表（每个元素对应一个群聊或私聊目标）
@@ -73,7 +73,7 @@ auto_reply_config:
         # 可用原子条件：at_bot / keyword / always / ai_decide
         # 逻辑运算：||（或）/ &&（且）/ !（非）/ ()（分组）
         # 例如：at_bot || keyword
-        trigger_mode: "at_bot || keyword"
+        trigger_mode: "keyword && ai_decide"
 
         # keywords：当 trigger_mode 使用 keyword 时生效
         keywords:

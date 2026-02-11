@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, TypedDict
 import json
 import os
@@ -43,6 +43,74 @@ def get_auto_reply_monitor_numbers(chat_type: str = "group") -> set[str]:
     return monitor_numbers
 
 
+def load_recent_context_messages(
+    *,
+    chat_type: str,
+    group_id: str,
+    user_id: str,
+    current_ts: str,
+    current_cleaned_message: str,
+    limit: int,
+    max_chars: int,
+    log_path: str = "message.jsonl",
+) -> list[str]:
+    """从 message.jsonl 读取最近上下文消息（按 chat_type + 会话范围）。"""
+    try:
+        with open(log_path, "r", encoding="utf-8") as file:
+            raw_lines = [line.strip() for line in file if line.strip()]
+    except OSError:
+        return []
+
+    matched_records: list[tuple[str, str, str]] = []
+    target_chat_type = str(chat_type).strip().lower()
+    target_group = str(group_id)
+    target_user = str(user_id)
+    for raw_line in raw_lines:
+        try:
+            payload = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+
+        payload_chat_type = str(payload.get("chat_type", "")).strip().lower()
+        if payload_chat_type != target_chat_type:
+            continue
+        if target_chat_type == "group" and str(payload.get("group_id", "")) != target_group:
+            continue
+        if target_chat_type == "private" and str(payload.get("user_id", "")) != target_user:
+            continue
+
+        cleaned_message = str(payload.get("cleaned_message", "")).strip()
+        if not cleaned_message:
+            continue
+        sender_name = str(payload.get("user_name", "")).strip() or str(payload.get("user_id", ""))
+        ts = str(payload.get("ts", ""))
+        matched_records.append((ts, sender_name, cleaned_message))
+
+    context_lines: list[str] = []
+    total_chars = 0
+    skipped_current = False
+    for ts, sender_name, message_text in reversed(matched_records):
+        if (
+            not skipped_current
+            and str(ts) == str(current_ts)
+            and str(message_text) == str(current_cleaned_message)
+        ):
+            skipped_current = True
+            continue
+
+        line = f"[{ts}] {sender_name}: {message_text}" if ts else f"{sender_name}: {message_text}"
+        if total_chars + len(line) > max_chars:
+            break
+        context_lines.append(line)
+        total_chars += len(line)
+        if len(context_lines) >= limit:
+            break
+
+    return list(reversed(context_lines))
+
+
 @dataclass
 class AutoReplyMessageContext:
     chat_type: str
@@ -52,6 +120,7 @@ class AutoReplyMessageContext:
     ts: str
     raw_message: str
     cleaned_message: str
+    history_messages: list[str] = field(default_factory=list)
     run_id: str = ""
 
 
@@ -73,6 +142,7 @@ class AutoReplyAIState(TypedDict):
     ts: str
     raw_message: str
     cleaned_message: str
+    history_messages: list[str]
     should_reply: bool
     reason: str
 
@@ -86,6 +156,7 @@ class AutoReplyGenerateState(TypedDict):
     ts: str
     raw_message: str
     cleaned_message: str
+    history_messages: list[str]
     reply_text: str
 
 
@@ -309,6 +380,7 @@ class AutoReplyDecisionEngine:
                 "ts": state["ts"],
                 "raw_message": state["raw_message"],
                 "cleaned_message": state["cleaned_message"],
+                "history_messages": state["history_messages"],
             }
             result = llm.invoke(
                 [
@@ -338,7 +410,7 @@ class AutoReplyDecisionEngine:
             user_id=context.user_id,
             user_name=context.user_name,
             ts=context.ts,
-            extra={"model": self.model},
+            extra={"model": self.model, "history_count": len(context.history_messages)},
         )
 
         final_state = app.invoke(
@@ -351,6 +423,7 @@ class AutoReplyDecisionEngine:
                 "ts": context.ts,
                 "raw_message": context.raw_message,
                 "cleaned_message": context.cleaned_message,
+                "history_messages": context.history_messages,
                 "should_reply": False,
                 "reason": "",
             }
@@ -410,6 +483,7 @@ class AutoReplyDecisionEngine:
                 "ts": state["ts"],
                 "raw_message": state["raw_message"],
                 "cleaned_message": state["cleaned_message"],
+                "history_messages": state["history_messages"],
             }
             result = llm.invoke(
                 [
@@ -438,7 +512,7 @@ class AutoReplyDecisionEngine:
             user_id=context.user_id,
             user_name=context.user_name,
             ts=context.ts,
-            extra={"model": self.model},
+            extra={"model": self.model, "history_count": len(context.history_messages)},
         )
 
         final_state = app.invoke(
@@ -451,6 +525,7 @@ class AutoReplyDecisionEngine:
                 "ts": context.ts,
                 "raw_message": context.raw_message,
                 "cleaned_message": context.cleaned_message,
+                "history_messages": context.history_messages,
                 "reply_text": "",
             }
         )
@@ -483,6 +558,25 @@ def run_auto_reply_pipeline(
     run_id: str = "",
 ) -> dict[str, Any]:
     """AutoReply 主处理管道：先判定，再按规则提示词生成回复文本。"""
+    try:
+        context_limit = int(AUTO_REPLY_CONFIG.get("context_history_limit", 12))
+    except (TypeError, ValueError):
+        context_limit = 12
+    try:
+        context_max_chars = int(AUTO_REPLY_CONFIG.get("context_max_chars", 1800))
+    except (TypeError, ValueError):
+        context_max_chars = 1800
+
+    context_messages = load_recent_context_messages(
+        chat_type=str(chat_type).strip().lower(),
+        group_id=str(group_id),
+        user_id=str(user_id),
+        current_ts=str(ts),
+        current_cleaned_message=str(cleaned_message),
+        limit=max(context_limit, 0),
+        max_chars=max(context_max_chars, 0),
+    )
+
     context = AutoReplyMessageContext(
         chat_type=str(chat_type).strip().lower(),
         group_id=str(group_id),
@@ -491,7 +585,21 @@ def run_auto_reply_pipeline(
         ts=str(ts),
         raw_message=str(raw_message),
         cleaned_message=str(cleaned_message),
+        history_messages=context_messages,
         run_id=str(run_id),
+    )
+
+    observe_agent_event(
+        agent_name="auto_reply",
+        task_type="AUTO_REPLY",
+        stage="context_loaded",
+        run_id=context.run_id,
+        chat_type=context.chat_type,
+        group_id=context.group_id,
+        user_id=context.user_id,
+        user_name=context.user_name,
+        ts=context.ts,
+        extra={"history_count": len(context_messages), "context_max_chars": context_max_chars},
     )
 
     # 先判断是否要回复
