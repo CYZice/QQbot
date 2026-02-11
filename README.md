@@ -4,6 +4,12 @@
 
 这是一个基于 Python 的聊天机器人，其核心功能为自动接龙和群消息总结，目前使用 Napcat 作为信息收发方式开发。
 
+## Agent 文档
+
+- `docs/summary.md`：Summary 工作流与配置项
+- `docs/forward.md`：Forward 工作流与配置项
+- `docs/auto_reply.md`：Auto Reply 工作流与配置项
+
 ## 项目架构
 
 本项目采用多种方式对消息进行过滤以便于 AI 处理：
