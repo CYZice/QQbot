@@ -69,6 +69,15 @@ async def handle_task(task: PriorityTask):
             )
         except Exception as error:
             print(f"[FORWARD-ERROR] group={group_id} user={user_id} error={error}")
+    elif task.type == TaskType.AUTO_REPLY:
+        ts = str(getattr(task.msg, "ts", ""))
+        group_id = str(getattr(task.msg, "group_id", ""))
+        user_id = str(getattr(task.msg, "user_id", ""))
+        user_name = str(getattr(task.msg, "user_name", ""))
+        print(
+            "[AUTO_REPLY] "
+            f"group={group_id} user={user_name}({user_id}) ts={ts} queued"
+        )
     elif task.type == TaskType.GROUPNOTE:
         print("回复")
     else:

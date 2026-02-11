@@ -8,6 +8,7 @@ import logging
 from bot import allowed_id,urgent_keywords
 from workflows.summary import build_summary_chunks_from_log_lines
 from workflows.forward import get_forward_monitor_group_ids
+from workflows.auto_reply import get_auto_reply_monitor_numbers
 
 
 class TaskPriority(IntEnum):
@@ -18,6 +19,7 @@ class TaskType(IntEnum):
     SUMMARY = 0 
     FROWARD = 1 
     GROUPNOTE = 2
+    AUTO_REPLY = 3
 
 class PriorityTask:#带优先级的任务包装
     _counter = 0  # 全局计数器，保证同优先级FIFO
@@ -170,7 +172,6 @@ async def process_private_msg(msg: PrivateMessage):
             cleaned_message,
         )
 
-
 def _write_log(
     ts: str,
     group_id: str,
@@ -277,6 +278,40 @@ async def enqueue_forward_by_monitor_group(msg: GroupMessage) -> bool:
     )
     await scheduler.push(forward_msg, TaskType.FROWARD)
     return True
+
+
+async def enqueue_auto_reply_if_monitored(
+    msg: GroupMessage | PrivateMessage,
+    chat_type: str,
+) -> bool:
+    """按 auto_reply 监控配置投递任务，支持 group/private。"""
+    target_chat_type = str(chat_type).strip().lower()
+    if target_chat_type not in {"group", "private"}:
+        return False
+
+    monitor_numbers = get_auto_reply_monitor_numbers(chat_type=target_chat_type)
+    monitor_value = (
+        str(getattr(msg, "group_id", ""))
+        if target_chat_type == "group"
+        else str(getattr(msg, "user_id", ""))
+    )
+    if monitor_value not in monitor_numbers:
+        return False
+
+    original_raw_message = getattr(msg, "raw_message", "") or ""
+    cleaned_message = clean_message(original_raw_message)
+    auto_reply_msg = SimpleNamespace(
+        raw_message=original_raw_message,
+        cleaned_message=cleaned_message,
+        chat_type=target_chat_type,
+        group_id=monitor_value if target_chat_type == "group" else "private",
+        user_id=str(getattr(msg, "user_id", "unknown")),
+        user_name=_extract_user_name(msg),
+        ts=_extract_message_ts(msg),
+    )
+    await scheduler.push(auto_reply_msg, TaskType.AUTO_REPLY)
+    return True
+
 
 def _extract_user_name(msg: GroupMessage | PrivateMessage) -> str:
     """提取发送者昵称，优先群名片，其次 QQ 昵称。"""

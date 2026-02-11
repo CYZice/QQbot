@@ -10,6 +10,7 @@ async def worker():
 
 @bot.private_event()# type: ignore
 async def on_private_message(msg: PrivateMessage):
+    await scheduler.enqueue_auto_reply_if_monitored(msg, chat_type="private")
     await scheduler.process_private_msg(msg)
     if msg.raw_message == "测试":
         await bot.api.post_private_msg(msg.user_id, text="NcatBot测试成功")
@@ -20,6 +21,7 @@ async def on_private_message(msg: PrivateMessage):
 
 @bot.group_event()# type: ignore
 async def on_group_message(msg: GroupMessage):
+    await scheduler.enqueue_auto_reply_if_monitored(msg, chat_type="group")
     await scheduler.processmsg(msg)
     await scheduler.enqueue_forward_by_monitor_group(msg)
     
