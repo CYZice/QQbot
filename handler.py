@@ -1,6 +1,7 @@
 import asyncio
 from time import perf_counter
 
+from agent_pool import submit_agent_job
 from scheduler import PriorityTask, TaskType
 from bot import bot, QQnumber
 from workflows.agent_observe import generate_run_id, observe_agent_event
@@ -120,7 +121,7 @@ async def handle_task(task: PriorityTask):
         )
 
         try:
-            result = await asyncio.to_thread(
+            result = await submit_agent_job(
                 run_auto_reply_pipeline,
                 chat_type=chat_type,
                 group_id=group_id,
@@ -130,6 +131,9 @@ async def handle_task(task: PriorityTask):
                 raw_message=raw_message,
                 cleaned_message=cleaned_message,
                 run_id=run_id,
+                priority=0,
+                timeout=120.0,
+                run_in_thread=True,
             )
             elapsed_ms = (perf_counter() - started) * 1000
             observe_agent_event(
