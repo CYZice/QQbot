@@ -6,9 +6,9 @@
 
 ## Agent 文档
 
-- `docs/summary.md`：Summary 工作流与配置项
-- `docs/forward.md`：Forward 工作流与配置项
-- `docs/auto_reply.md`：Auto Reply 工作流与配置项
+- [Summary 工作流与配置项](docs/summary.md)
+- [Forward 工作流与配置项](docs/forward.md)
+- [Auto Reply 工作流与配置项](docs/auto_reply.md)
 
 ## 项目架构
 
