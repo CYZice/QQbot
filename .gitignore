@@ -12,7 +12,7 @@ plugins
 
 bot.py
 config.yaml
-workflows/agent_config.yaml
+
 
 logs/message_handler.log
 message.log

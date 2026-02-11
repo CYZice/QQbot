@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, TypedDict
+from types import SimpleNamespace
+from typing import Any, Awaitable, Callable, TypedDict
 import json
 import os
 import re
@@ -94,6 +96,250 @@ def get_auto_reply_monitor_numbers(chat_type: str = "group") -> set[str]:
         if number:
             monitor_numbers.add(number)
     return monitor_numbers
+
+
+class AutoReplyDispatcher:
+    """AutoReply 接入层：监控命中 + 冷却窗口 + pending 聚合/过期。"""
+
+    def __init__(self):
+        self._state_lock = asyncio.Lock()
+        self._session_states: dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def _build_session_key(chat_type: str, monitor_value: str) -> str:
+        return f"{chat_type}:{monitor_value}"
+
+    @staticmethod
+    def _build_payload(
+        *,
+        raw_message: str,
+        cleaned_message: str,
+        chat_type: str,
+        group_id: str,
+        user_id: str,
+        user_name: str,
+        ts: str,
+    ) -> dict[str, str]:
+        return {
+            "raw_message": raw_message,
+            "cleaned_message": cleaned_message,
+            "chat_type": chat_type,
+            "group_id": group_id,
+            "user_id": user_id,
+            "user_name": user_name,
+            "ts": ts,
+        }
+
+    @staticmethod
+    def payload_to_message(payload: dict[str, str]) -> SimpleNamespace:
+        return SimpleNamespace(
+            raw_message=str(payload.get("raw_message", "")),
+            cleaned_message=str(payload.get("cleaned_message", "")),
+            chat_type=str(payload.get("chat_type", "")),
+            group_id=str(payload.get("group_id", "")),
+            user_id=str(payload.get("user_id", "unknown")),
+            user_name=str(payload.get("user_name", "")),
+            ts=str(payload.get("ts", "")),
+        )
+
+    @staticmethod
+    def _hit_at_bot(raw_message: str, bot_qq: str) -> bool:
+        at_ids = re.findall(r"\[CQ:at,qq=(\d+)\]", raw_message or "")
+        if not at_ids:
+            return False
+        configured_bot_qq = str(bot_qq).strip()
+        if not configured_bot_qq:
+            return False
+        return configured_bot_qq in at_ids
+
+    async def enqueue_if_monitored(
+        self,
+        *,
+        chat_type: str,
+        monitor_value: str,
+        raw_message: str,
+        cleaned_message: str,
+        user_id: str,
+        user_name: str,
+        ts: str,
+        enqueue_payload: Callable[[dict[str, str]], Awaitable[None]],
+    ) -> bool:
+        target_chat_type = str(chat_type).strip().lower()
+        if target_chat_type not in {"group", "private"}:
+            return False
+
+        normalized_monitor_value = str(monitor_value)
+        monitor_numbers = get_auto_reply_monitor_numbers(chat_type=target_chat_type)
+        if normalized_monitor_value not in monitor_numbers:
+            return False
+
+        runtime_config = get_auto_reply_runtime_config()
+        min_reply_interval = max(int(runtime_config.get("min_reply_interval_seconds", 300)), 0)
+        pending_max_messages = max(int(runtime_config.get("pending_max_messages", 50)), 1)
+
+        auto_reply_payload = self._build_payload(
+            raw_message=str(raw_message),
+            cleaned_message=str(cleaned_message),
+            chat_type=target_chat_type,
+            group_id=normalized_monitor_value if target_chat_type == "group" else "private",
+            user_id=str(user_id),
+            user_name=str(user_name),
+            ts=str(ts),
+        )
+
+        bypass_cooldown = (
+            target_chat_type == "group"
+            and bool(runtime_config.get("bypass_cooldown_when_at_bot", True))
+            and self._hit_at_bot(str(raw_message), str(runtime_config.get("bot_qq", "")))
+        )
+        if bypass_cooldown:
+            observe_agent_event(
+                agent_name="auto_reply",
+                task_type="AUTO_REPLY",
+                stage="throttle_bypass_cooldown",
+                chat_type=target_chat_type,
+                group_id=auto_reply_payload["group_id"],
+                user_id=auto_reply_payload["user_id"],
+                user_name=auto_reply_payload["user_name"],
+                ts=auto_reply_payload["ts"],
+                extra={
+                    "session": f"{target_chat_type}:{normalized_monitor_value}",
+                    "reason": "at_bot",
+                },
+            )
+
+        enqueue_now = True
+        if min_reply_interval > 0 and not bypass_cooldown:
+            session_key = self._build_session_key(target_chat_type, normalized_monitor_value)
+            now = datetime.now().timestamp()
+            async with self._state_lock:
+                state = self._session_states.setdefault(
+                    session_key,
+                    {
+                        "next_allowed_at": 0.0,
+                        "pending_payload": None,
+                        "pending_since": 0.0,
+                        "pending_count": 0,
+                    },
+                )
+                next_allowed_at = float(state.get("next_allowed_at", 0.0) or 0.0)
+                if now < next_allowed_at:
+                    state["pending_payload"] = auto_reply_payload
+                    previous_count = int(state.get("pending_count", 0) or 0)
+                    state["pending_count"] = min(previous_count + 1, pending_max_messages)
+                    if not float(state.get("pending_since", 0.0) or 0.0):
+                        state["pending_since"] = now
+                    observe_agent_event(
+                        agent_name="auto_reply",
+                        task_type="AUTO_REPLY",
+                        stage="throttle_queued_pending",
+                        chat_type=target_chat_type,
+                        group_id=auto_reply_payload["group_id"],
+                        user_id=auto_reply_payload["user_id"],
+                        user_name=auto_reply_payload["user_name"],
+                        ts=auto_reply_payload["ts"],
+                        extra={
+                            "session": session_key,
+                            "pending_count": int(state.get("pending_count", 0) or 0),
+                            "cooldown_left_seconds": max(int(next_allowed_at - now), 0),
+                        },
+                    )
+                    enqueue_now = False
+                else:
+                    state["next_allowed_at"] = now + min_reply_interval
+                    state["pending_payload"] = None
+                    state["pending_since"] = 0.0
+                    state["pending_count"] = 0
+
+        if enqueue_now:
+            observe_agent_event(
+                agent_name="auto_reply",
+                task_type="AUTO_REPLY",
+                stage="throttle_enqueue_now",
+                chat_type=target_chat_type,
+                group_id=auto_reply_payload["group_id"],
+                user_id=auto_reply_payload["user_id"],
+                user_name=auto_reply_payload["user_name"],
+                ts=auto_reply_payload["ts"],
+                extra={
+                    "session": f"{target_chat_type}:{normalized_monitor_value}",
+                    "cooldown_seconds": min_reply_interval,
+                },
+            )
+            await enqueue_payload(auto_reply_payload)
+        return True
+
+    async def pending_worker(self, *, enqueue_payload: Callable[[dict[str, str]], Awaitable[None]]) -> None:
+        while True:
+            runtime_config = get_auto_reply_runtime_config()
+            check_interval = max(int(runtime_config.get("flush_check_interval_seconds", 10)), 1)
+            min_interval = max(int(runtime_config.get("min_reply_interval_seconds", 300)), 0)
+            pending_expire = max(int(runtime_config.get("pending_expire_seconds", 3600)), 0)
+            now = datetime.now().timestamp()
+            due_payloads: list[dict[str, str]] = []
+
+            async with self._state_lock:
+                for session_key, state in self._session_states.items():
+                    pending_payload = state.get("pending_payload")
+                    if not isinstance(pending_payload, dict):
+                        continue
+
+                    pending_since = float(state.get("pending_since", now) or now)
+                    if pending_expire > 0 and (now - pending_since) > pending_expire:
+                        observe_agent_event(
+                            agent_name="auto_reply",
+                            task_type="AUTO_REPLY",
+                            stage="throttle_pending_expired",
+                            chat_type=str(pending_payload.get("chat_type", "")),
+                            group_id=str(pending_payload.get("group_id", "")),
+                            user_id=str(pending_payload.get("user_id", "")),
+                            user_name=str(pending_payload.get("user_name", "")),
+                            ts=str(pending_payload.get("ts", "")),
+                            extra={
+                                "session": session_key,
+                                "pending_age_seconds": int(now - pending_since),
+                            },
+                        )
+                        state["pending_payload"] = None
+                        state["pending_since"] = 0.0
+                        state["pending_count"] = 0
+                        continue
+
+                    next_allowed_at = float(state.get("next_allowed_at", 0.0) or 0.0)
+                    if now < next_allowed_at:
+                        continue
+
+                    observe_agent_event(
+                        agent_name="auto_reply",
+                        task_type="AUTO_REPLY",
+                        stage="throttle_pending_flush",
+                        chat_type=str(pending_payload.get("chat_type", "")),
+                        group_id=str(pending_payload.get("group_id", "")),
+                        user_id=str(pending_payload.get("user_id", "")),
+                        user_name=str(pending_payload.get("user_name", "")),
+                        ts=str(pending_payload.get("ts", "")),
+                        extra={
+                            "session": session_key,
+                            "pending_count": int(state.get("pending_count", 0) or 0),
+                        },
+                    )
+                    due_payloads.append(pending_payload)
+                    state["pending_payload"] = None
+                    state["pending_since"] = 0.0
+                    state["pending_count"] = 0
+                    state["next_allowed_at"] = now + min_interval if min_interval > 0 else 0.0
+
+            for payload in due_payloads:
+                await enqueue_payload(payload)
+
+            await asyncio.sleep(check_interval)
+
+
+_AUTO_REPLY_DISPATCHER = AutoReplyDispatcher()
+
+
+def get_auto_reply_dispatcher() -> AutoReplyDispatcher:
+    return _AUTO_REPLY_DISPATCHER
 
 
 def load_recent_context_messages(
