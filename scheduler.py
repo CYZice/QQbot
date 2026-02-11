@@ -234,7 +234,7 @@ async def daily_summary(run_mode: str = "manual"):
 
         for chunk in final_chunks:
             msg = SimpleNamespace(raw_message=chunk)
-            await scheduler.push(msg, TaskType.SUMMARY)
+            await scheduler.RTpush(msg, TaskType.SUMMARY) # 已改成RTpush
 
         print(
             f"日志分组完成: groups={meta.get('group_count', '0')}, "
