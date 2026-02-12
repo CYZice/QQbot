@@ -5,18 +5,22 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from time import perf_counter
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, TypedDict
 import json
 import os
 import re
 
+from ncatbot.core import GroupMessage, PrivateMessage
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
-from workflows.agent_observe import bind_agent_event
+from agent_pool import submit_agent_job
+from bot import bot
+from workflows.agent_observe import bind_agent_event, generate_run_id
 from workflows.agent_config_loader import load_current_agent_config
 
 try:
@@ -324,6 +328,198 @@ _AUTO_REPLY_DISPATCHER = AutoReplyDispatcher()
 
 def get_auto_reply_dispatcher() -> AutoReplyDispatcher:
     return _AUTO_REPLY_DISPATCHER
+
+
+def clean_message(raw_message: str) -> str:
+    at_matches = re.findall(r"\[CQ:at,qq=(\d+)\]", raw_message)
+    at_text = f"[@{','.join(at_matches)}]" if at_matches else ""
+    cq_patterns = {
+        r"\[CQ:image,file=[^]]+\]": "[图片]",
+        r"\[CQ:reply,id=\d+\]": "[回复]",
+        r"\[CQ:file,file=[^]]+\]": "[文件]",
+        r"\[CQ:record,file=[^]]+\]": "[语音]",
+        r"\[CQ:video,file=[^]]+\]": "[视频]",
+    }
+    cleaned = raw_message
+    for pattern, replacement in cq_patterns.items():
+        cleaned = re.sub(pattern, replacement, cleaned)
+    if at_matches:
+        cleaned = re.sub(r"\[CQ:at,qq=\d+\]", at_text, cleaned)
+    return cleaned.strip()
+
+
+def _extract_message_ts(msg: GroupMessage | PrivateMessage) -> str:
+    ts_candidate = getattr(msg, "time", None)
+    if ts_candidate is not None:
+        try:
+            ts_value = float(ts_candidate)
+            return datetime.fromtimestamp(ts_value, tz=timezone.utc).astimezone().isoformat(timespec="seconds")
+        except (TypeError, ValueError, OSError):
+            pass
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _extract_user_name(msg: GroupMessage | PrivateMessage) -> str:
+    sender = getattr(msg, "sender", None)
+
+    def pick(data, *keys):
+        for key in keys:
+            if isinstance(data, dict):
+                value = data.get(key)
+            else:
+                value = getattr(data, key, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    for source in (msg, sender):
+        if not source:
+            continue
+        name = pick(
+            source,
+            "card",
+            "group_card",
+            "display_name",
+            "nickname",
+            "nick",
+            "user_name",
+            "sender_nickname",
+        )
+        if name:
+            return name
+
+    return str(getattr(msg, "user_id", "unknown_user"))
+
+
+async def _execute_auto_reply_payload(payload: dict[str, str]) -> None:
+    ts = str(payload.get("ts", ""))
+    chat_type = str(payload.get("chat_type", ""))
+    group_id = str(payload.get("group_id", ""))
+    user_id = str(payload.get("user_id", ""))
+    user_name = str(payload.get("user_name", ""))
+    raw_message = str(payload.get("raw_message", ""))
+    cleaned_message = str(payload.get("cleaned_message", raw_message))
+
+    run_id = generate_run_id()
+    started = perf_counter()
+    log_event = bind_agent_event(
+        agent_name="auto_reply",
+        task_type="AUTO_REPLY",
+        run_id=run_id,
+        chat_type=chat_type,
+        group_id=group_id,
+        user_id=user_id,
+        user_name=user_name,
+        ts=ts,
+    )
+    log_event(stage="start")
+
+    try:
+        result = await submit_agent_job(
+            run_auto_reply_pipeline,
+            chat_type=chat_type,
+            group_id=group_id,
+            user_id=user_id,
+            user_name=user_name,
+            ts=ts,
+            raw_message=raw_message,
+            cleaned_message=cleaned_message,
+            run_id=run_id,
+            priority=0,
+            timeout=120.0,
+            run_in_thread=True,
+        )
+        elapsed_ms = (perf_counter() - started) * 1000
+        log_event(
+            stage="end",
+            latency_ms=elapsed_ms,
+            decision={
+                "should_reply": bool(result.get("should_reply", False)),
+                "reason": str(result.get("reason", "")),
+                "matched_rule": result.get("matched_rule"),
+                "trigger_mode": result.get("trigger_mode", ""),
+                "reply_length": len(str(result.get("reply_text", "") or "")),
+            },
+        )
+        should_reply_flag = bool(result.get("should_reply", False))
+        reason_text = str(result.get("reason", ""))
+        reply_text = str(result.get("reply_text", "") or "").strip()
+
+        if should_reply_flag and reply_text:
+            log_event(stage="send_start", extra={"reply_length": len(reply_text)})
+            try:
+                if chat_type == "group":
+                    await bot.api.post_group_msg(group_id, text=reply_text)
+                else:
+                    await bot.api.post_private_msg(user_id, text=reply_text)
+                log_event(stage="send_end", decision={"sent": True, "reply_length": len(reply_text)})
+            except Exception as send_error:
+                log_event(stage="send_error", error=str(send_error))
+                print(
+                    "[AUTO_REPLY-SEND-ERROR] "
+                    f"chat={chat_type} group={group_id} user={user_id} error={send_error}"
+                )
+        elif should_reply_flag:
+            log_event(stage="send_skip", decision={"sent": False, "reason": "reply_text_empty"})
+
+        print(
+            "[AUTO_REPLY] "
+            f"chat={chat_type} group={group_id} user={user_name}({user_id}) "
+            f"should_reply={should_reply_flag} "
+            f"reason={reason_text} reply_len={len(reply_text)}"
+        )
+    except Exception as error:
+        elapsed_ms = (perf_counter() - started) * 1000
+        log_event(stage="error", latency_ms=elapsed_ms, error=str(error))
+        print(
+            "[AUTO_REPLY-ERROR] "
+            f"chat={chat_type} group={group_id} user={user_id} error={error}"
+        )
+
+
+def _create_auto_reply_task(payload: dict[str, str]) -> None:
+    task = asyncio.create_task(_execute_auto_reply_payload(payload))
+
+    def _on_done(done_task: asyncio.Task) -> None:
+        try:
+            done_task.result()
+        except Exception as error:
+            print(f"[AUTO_REPLY-ASYNC-ERROR] error={error}")
+
+    task.add_done_callback(_on_done)
+
+
+async def _enqueue_auto_reply_payload(payload: dict[str, str]) -> None:
+    _create_auto_reply_task(payload)
+
+
+async def auto_reply_pending_worker() -> None:
+    dispatcher = get_auto_reply_dispatcher()
+    await dispatcher.pending_worker(enqueue_payload=_enqueue_auto_reply_payload)
+
+
+async def enqueue_auto_reply_if_monitored(
+    msg: GroupMessage | PrivateMessage,
+    chat_type: str,
+) -> bool:
+    target_chat_type = str(chat_type).strip().lower()
+    monitor_value = (
+        str(getattr(msg, "group_id", ""))
+        if target_chat_type == "group"
+        else str(getattr(msg, "user_id", ""))
+    )
+    raw_message = getattr(msg, "raw_message", "") or ""
+    dispatcher = get_auto_reply_dispatcher()
+    return await dispatcher.enqueue_if_monitored(
+        chat_type=target_chat_type,
+        monitor_value=monitor_value,
+        raw_message=raw_message,
+        cleaned_message=clean_message(raw_message),
+        user_id=str(getattr(msg, "user_id", "unknown")),
+        user_name=_extract_user_name(msg),
+        ts=_extract_message_ts(msg),
+        enqueue_payload=_enqueue_auto_reply_payload,
+    )
 
 
 def load_recent_context_messages(

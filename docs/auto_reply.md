@@ -5,8 +5,8 @@
   - 群聊：`main.on_group_message` -> `enqueue_auto_reply_if_monitored(..., "group")`
   - 私聊：`main.on_private_message` -> `enqueue_auto_reply_if_monitored(..., "private")`
 - 调度流程：
-  - 命中监控目标后投递 `TaskType.AUTO_REPLY`
-  - `handler.handle_task` 调用 `run_auto_reply_pipeline`
+  - 命中监控目标后由 `workflows.auto_reply` 直接提交执行（`submit_agent_job(...)`）
+  - 执行 `run_auto_reply_pipeline`
   - 管道步骤：
     1) 加载最近上下文（来自 `message.jsonl`）
     2) 判定是否回复（表达式 + 可选 AI 判定）
