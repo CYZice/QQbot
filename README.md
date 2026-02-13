@@ -126,7 +126,7 @@ flowchart TB
     FormatMsg --> SendOwner[私发结果]
     
     DailyCron[定时器 22:00] -->|触发| DailySummary[daily_summary<br />run_mode=auto]
-    ManualCmd[/summary] -->|触发| DailySummary
+    ManualCmd[手动触发 /summary] -->|触发| DailySummary
     
     style Queue fill:#e1f5ff
     style ARDecision fill:#ffe1b3
@@ -244,4 +244,5 @@ python main.py
 3. 编写代码并补充文档
 
 4. 提交 Pull Request
+
 
