@@ -84,7 +84,8 @@
 
 ### 核心处理链路
 
-```mermaidflowchart TB
+```mermaid
+flowchart TB
     Start([收到群/私聊消息]) --> PreProcess[clean_message<br />去除CQ码、提取@、替换媒体占位]
     PreProcess --> WriteLog[写入message.jsonl<br />含ts, chat_type, group_id, user_id, user_name, cleaned_message]
     
@@ -243,3 +244,4 @@ python main.py
 3. 编写代码并补充文档
 
 4. 提交 Pull Request
+
