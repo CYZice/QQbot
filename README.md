@@ -84,25 +84,24 @@
 
 ### 核心处理链路
 
-```mermaid
-flowchart TB
-    Start([收到群/私聊消息]) --> PreProcess[clean_message<br/>去除CQ码、提取@、替换媒体占位]
-    PreProcess --> WriteLog[写入message.jsonl<br/>含ts, chat_type, group_id, user_id, user_name, cleaned_message]
+```mermaidflowchart TB
+    Start([收到群/私聊消息]) --> PreProcess[clean_message<br />去除CQ码、提取@、替换媒体占位]
+    PreProcess --> WriteLog[写入message.jsonl<br />含ts, chat_type, group_id, user_id, user_name, cleaned_message]
     
     WriteLog --> AutoReply{enqueue_auto_reply_if_monitored}
     AutoReply -->|命中auto_reply规则| ARQueue[构建AutoReplyPayload]
     ARQueue --> CooldownCheck{冷却检查}
     CooldownCheck -->|冷却中| Pending[(pending缓存)]
-    CooldownCheck -->|可执行| ARTask[提交到Agent池<br/>priority=0]
+    CooldownCheck -->|可执行| ARTask[提交到Agent池<br />priority=0]
     
     WriteLog --> Forward{enqueue_forward_by_monitor_group}
-    Forward -->|群在监控列表| FwdTask[提交到Agent池<br/>priority=5]
+    Forward -->|群在监控列表| FwdTask[提交到Agent池<br />priority=5]
     
     WriteLog --> SummaryLog[仅记录，供定时总结使用]
     
     subgraph AgentPool [Agent 任务池]
         direction TB
-        Queue[(优先级队列<br/>0~15)] --> Worker[Worker线程]
+        Queue[(优先级队列<br />0~15)] --> Worker[Worker线程]
         Worker --> Execute[执行submit_agent_job]
     end
     
@@ -110,7 +109,7 @@ flowchart TB
     FwdTask --> Queue
     
     Execute -->|auto_reply| ARPipeline[run_auto_reply_pipeline]
-    ARPipeline --> ARDecision[DecisionEngine<br/>规则表达式求值]
+    ARPipeline --> ARDecision[DecisionEngine<br />规则表达式求值]
     ARDecision -->|should_reply=True| ARGenerate[生成回复]
     ARGenerate --> SendMsg[bot.api.post_group/private_msg]
     
@@ -125,7 +124,7 @@ flowchart TB
     GlobalOverview --> FormatMsg[format_grouped_summary_messages]
     FormatMsg --> SendOwner[私发结果]
     
-    DailyCron[定时器 22:00] -->|触发| DailySummary[daily_summary<br/>run_mode=auto]
+    DailyCron[定时器 22:00] -->|触发| DailySummary[daily_summary<br />run_mode=auto]
     ManualCmd[/summary] -->|触发| DailySummary
     
     style Queue fill:#e1f5ff
@@ -242,4 +241,5 @@ python main.py
 1. Fork 仓库
 2. 新建 feature 分支
 3. 编写代码并补充文档
+
 4. 提交 Pull Request
