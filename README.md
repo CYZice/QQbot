@@ -245,4 +245,9 @@ python main.py
 
 4. 提交 Pull Request
 
+## 鸣谢
+
+- [ncatbot](https://github.com/liyihao1110/ncatbot) - 简洁高效的 QQ 机器人 Python 框架
+- [Napcat](https://napneko.github.io/) - 强大的 QQ 协议实现与消息收发服务
+
 
