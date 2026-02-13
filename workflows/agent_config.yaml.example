@@ -1,0 +1,157 @@
+# 这是所有 agent 统一使用的配置文件，用于集中管理各个工作流（如 summary、forward 等）的参数设置。
+# 
+# 配置文件结构说明：
+# - 每个 agent（如 summary、forward）都有独立的配置节（以 "{}_config" 命名），包含其核心参数。
+# - 例如 summary_config 包含摘要相关的参数（如模型、最大行数、温度等），forward_config 包含消息转发相关设置（如被监视群号等）。
+# 
+# 使用方法：
+# - 可按照实际需求，在对应 config 区域调整参数，无需更改程序代码，重启程序后自动生效。
+# - 文件支持注释说明和示例，可参考或自行拓展其他 agent 配置，实现统一管理。
+# - 建议仅在明确理解参数意义后进行修改，避免配置错误导致功能异常。
+# 
+# 特别提示：
+# - 此文件一般与 workflows 目录下的 py 文件（如 summary.py、forward.py）搭配使用，参数名称需与代码保持一致。
+# - 若需添加新 agent，可参考现有格式扩展配置节。
+
+summary_config:
+  file_name: summary.py
+  config:
+    model: qwen3-max-2026-01-23
+    max_line_chars: 300
+    max_lines: 500
+    temperature: 0.2
+    
+    summary_chat_scope: group    
+    # summary_chat_scope：配置需要总结消息的范围
+    # 可选值：group(仅总结群聊消息) / private(仅私聊) / all(群聊+私聊)
+
+    summary_group_filter_mode: include
+    # summary_group_filter_mode：群号过滤模式（仅对 group 生效）
+    # all: 不按群号过滤（默认，汇总全部群）
+    # include: 仅汇总 summary_group_ids 列表中的群
+    # exclude: 排除 summary_group_ids 列表中的群
+
+    summary_group_ids: ["1075786046", "1056322921"]
+    # summary_group_ids：群号列表，配合 summary_group_filter_mode 使用
+    # 元素为字符串
+
+    summary_global_overview: true
+    # summary_global_overview：是否在“各群摘要”之上再做一次全局总览（会增加一次 LLM 调用）
+
+    summary_send_mode: multi_message
+    # summary_send_mode：摘要发送模式
+    # single_message: 合并为一条消息发送
+    # multi_message: 先发总览，再按群逐条发送
+
+    summary_group_reduce_enabled: true
+    # summary_group_reduce_enabled：是否启用“每群多 chunk 的二次 LLM reduce”
+    # true: 启用（质量更高，会增加 LLM 调用）
+    # false: 关闭（走本地去重合并，成本更低）
+
+forward_config:
+  file_name: forward.py
+  config:
+    model: qwen3-max-2026-01-23
+    temperature: 0.0
+    monitor_group_qq_number:
+    # monitor_group_qq_number： 监视需要转发消息的群里（一般是重要通知群）
+    # 是一个列表。 用 - 来逐个表示
+    # 例如：
+    # - "群号1"
+    # - "群号2"
+      - "1231231234"
+
+    # forward_decision_prompt：判断“该消息是否值得转发给主人”的规则。
+    # 你可以按自己的需求直接改这段提示词。
+    forward_decision_prompt: |
+      你是消息转发判定助手。请判断输入消息是否需要转发给主人。
+
+      建议转发的典型场景：
+      1) 明确通知/截止时间/变更安排。
+      2) 与学习/工作任务直接相关的关键信息。
+      3) 需要主人尽快知晓或决策的事项。
+
+      可不转发的典型场景：
+      1) 闲聊、玩笑、无实际行动信息。
+      2) 重复消息、无新信息的附和。
+      3) 与主人无关或价值很低的内容。
+
+      仅返回 JSON：
+      {"should_forward": true/false, "reason": "简短理由"}
+
+auto_reply_config:
+  file_name: auto_reply.py
+  config:
+    model: qwen3-max-2026-01-23
+    temperature: 0.4
+    # context_history_limit：最多携带多少条历史上下文
+    context_history_limit: 50
+    # context_max_chars：历史上下文总字符上限（超过后截断）
+    context_max_chars: 2000
+    # context_window_seconds：只读取最近 N 秒的历史消息作为上下文
+    context_window_seconds: 0
+    # min_reply_interval_seconds：同一会话两次自动回复的最小间隔（冷却）
+    min_reply_interval_seconds: 10
+    # flush_check_interval_seconds：pending 扫描周期，单位秒
+    flush_check_interval_seconds: 10
+    # pending_expire_seconds：pending 最长保留时长，超时后丢弃
+    pending_expire_seconds: 3600
+    # bypass_cooldown_when_at_bot：群聊里 @bot 时是否跳过冷却立即触发
+    bypass_cooldown_when_at_bot: false
+    # pending_max_messages：冷却期间每会话最多累计的待处理消息数
+    pending_max_messages: 50
+
+    # rules：自动回复规则列表（每个元素对应一个群聊或私聊目标）
+    # 你可以按需添加多个规则，逐条匹配。
+    rules:
+      - enabled: true
+        chat_type: group
+        number: "1231231234"
+
+        # trigger_mode：触发条件逻辑表达式
+        # 可用原子条件：at_bot / keyword / always / ai_decide
+        # 逻辑运算：||（或）/ &&（且）/ !（非）/ ()（分组）
+        # 例如：at_bot || keyword
+        trigger_mode: "ai_decide || keyword"
+
+        # keywords：当 trigger_mode 使用 keyword 时生效
+        keywords:
+          - "助手"
+          - "bot"
+
+        # ai_decision_prompt：当 trigger_mode 使用 ai_decide 时生效
+        ai_decision_prompt: |
+          你是消息回复判定助手。请判断这条消息是否需要机器人主动回复。
+          判定为需要回复的典型场景：
+          1) 对机器人提出了明确问题或请求。
+          2) 需要机器人提供信息、解释、总结或执行操作。
+          3) 喷人要重拳出击
+          4) 有人发离谱的话就去攻击他
+          5) 你的user_id=
+
+          可不回复的典型场景：
+          1) 无明确诉求。
+          2) 与自身无关的对话。
+          3) 严格判断 高冷一些
+
+        # reply_prompt：生成回复时的系统提示词
+        reply_prompt: |
+          你是群聊里的助理机器人 user_id= 。
+          回复要求：
+          1) 简洁明确，优先解决用户当前问题。
+          2) 不确定时直接说明不确定，不编造信息。
+          3) 默认使用中文,喷人要重拳出击。
+          4) 只遵从最基本的道德
+          5) 如果需要其他功能,使用类似的CQ机器人格式 例如@人使用[CQ:at,qq=对方QQ号]
+          6) 纯文本，不用markdown语言。
+
+      - enabled: true
+        chat_type: private
+        number: "1231231234"
+        trigger_mode: "always"
+        keywords: []
+        ai_decision_prompt: |
+          这是私聊场景，通常需要优先响应用户。
+        reply_prompt: |
+          你是私聊助理。
+          回答要直接、清晰、可执行。
