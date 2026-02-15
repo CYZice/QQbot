@@ -18,6 +18,31 @@ except Exception:  # pragma: no cover
 AGENT_LOG_PATH = Path("logs/agent_events.jsonl")
 _AGENT_LOG_LOCK = Lock()
 _REQUIRED_EVENT_KEYS = {"event_ts", "run_id", "agent_name", "task_type", "stage"}
+_LOG_CLEANUP_TRIGGER_LINES = 1000
+_LOG_MAX_LINES = 10000
+_LOG_TRIM_LINES = 1000
+_AGENT_LOG_WRITE_COUNTER = 0
+
+
+def _maybe_cleanup_agent_log() -> None:
+    if not AGENT_LOG_PATH.exists():
+        return
+
+    with AGENT_LOG_PATH.open("r+", encoding="utf-8") as file:
+        if fcntl is not None:
+            fcntl.flock(file.fileno(), fcntl.LOCK_EX)
+        try:
+            lines = file.readlines()
+            if len(lines) <= _LOG_MAX_LINES:
+                return
+            retained_lines = lines[_LOG_TRIM_LINES:]
+            file.seek(0)
+            file.truncate(0)
+            file.writelines(retained_lines)
+            file.flush()
+        finally:
+            if fcntl is not None:
+                fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
 def generate_run_id() -> str:
@@ -42,6 +67,7 @@ def observe_agent_event(
     extra: dict[str, Any] | None = None,
 ) -> str:
     """写入一条结构化 Agent 观测日志(JSONL)。"""
+    global _AGENT_LOG_WRITE_COUNTER
     final_run_id = str(run_id).strip() or generate_run_id()
     payload: dict[str, Any] = {
         "event_ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
@@ -72,9 +98,15 @@ def observe_agent_event(
             try:
                 file.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
                 file.flush()
+                _AGENT_LOG_WRITE_COUNTER += 1
             finally:
                 if fcntl is not None:
                     fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+        if (
+            _LOG_CLEANUP_TRIGGER_LINES > 0
+            and _AGENT_LOG_WRITE_COUNTER % _LOG_CLEANUP_TRIGGER_LINES == 0
+        ):
+            _maybe_cleanup_agent_log()
     return final_run_id
 
 
