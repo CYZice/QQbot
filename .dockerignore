@@ -1,0 +1,22 @@
+.git
+.gitignore
+.vscode
+.claude
+.codex
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+.venv/
+venv/
+napcat/
+logs/
+data/
+plugins/
+message.jsonl
+message copy.jsonl
+*.processing
+.DS_Store
