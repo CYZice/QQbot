@@ -2,22 +2,47 @@ version: "3.8"
 
 services:
   qqbot:
-    image: ${IMAGE_NAME:-qqbot:latest}
+    # 1. 修改镜像路径：指向 GHCR 仓库，保留环境变量灵活性
+    image: ${IMAGE_NAME:-ghcr.io/limolin234/qqbot:latest}
     container_name: qqbot
+    
+    # 2. 优化重启策略：生产环境建议使用 unless-stopped
     restart: unless-stopped
+    
     working_dir: /app
+    
+    # 3. 环境变量优化
     environment:
-      TZ: Asia/Shanghai
-      NAPCAT_HOST: 127.0.0.1
-      NAPCAT_PORT: 3001
+      - TZ=Asia/Shanghai
+      - NAPCAT_HOST=127.0.0.1
+      - NAPCAT_PORT=3001
+      - PYTHONUNBUFFERED=1 # 确保 Python 日志能实时输出到 Docker 日志中
+    
+    # 如果 Dockerfile 中已经写了 CMD，这里可以省略；如果需要覆盖则保留
     command: ["python", "main.py"]
+    
+    # 4. 卷挂载优化（关键修改点）
     volumes:
-      - ./bot.py:/app/bot.py:ro
+      # 配置文件和数据建议挂载
       - ./config.yaml:/app/config.yaml
       - ./.env:/app/.env
       - ./workflows/agent_config.yaml:/app/workflows/agent_config.yaml:ro
       - ./message.jsonl:/app/message.jsonl
       - ./logs:/app/logs
       - ./data:/app/data
-      - ./plugins:/app/plugins
+      
+      # 注意：如果你的代码（bot.py, plugins）已经通过 GitHub Actions 打包进镜像了，
+      # 除非你在做本地调试，否则不需要再挂载代码文件。
+      # 挂载会覆盖镜像内的代码，导致你更新了镜像但容器里跑的还是旧代码。
+      # - ./bot.py:/app/bot.py:ro 
+      # - ./plugins:/app/plugins
+
+    # 5. 网络模式
     network_mode: host
+
+    # 6. 新增：日志限制（防止日志文件撑爆硬盘）
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
