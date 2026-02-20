@@ -1,39 +1,22 @@
-# ==========================================
-# 第一阶段：构建
-# ==========================================
-FROM python:3.11-slim AS builder
+FROM python:3.11-slim
 
+# 设置工作目录
 WORKDIR /app
 
-# 安装依赖
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+# 设置环境变量：时区、Python 输出不缓冲、不生成 pyc
+ENV TZ=Asia/Shanghai \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
-# 拷贝代码
+# 安装基础依赖（如果你的插件需要编译 C 扩展，才需要安装 build-essential）
+# RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
+
+# 1. 先拷贝依赖文件并安装（利用 Docker 缓存机制）
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 2. 拷贝项目所有文件
 COPY . .
 
-# 【关键】在镜像内部预先创建好需要写入的文件和文件夹
-RUN mkdir -p /app/logs && touch /app/message.jsonl
-
-# ==========================================
-# 第二阶段：运行 (Distroless)
-# ==========================================
-FROM gcr.io/distroless/python3-debian12:latest
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    TZ=Asia/Shanghai \
-    PYTHONPATH=/usr/local/lib/python3.11/site-packages
-
-WORKDIR /app
-
-# 拷贝库
-COPY --from=builder /install /usr/local
-
-# 【核心修复】使用 --chown 将整个 /app 目录授权给 nonroot 用户 (65532)
-# 这样程序在运行时可以自由读写 /app/logs 和 /app/message.jsonl
-COPY --from=builder --chown=65532:65532 /app /app
-
-USER 65532
-
-ENTRYPOINT ["python3", "main.py"]
+# 启动命令
+CMD ["python", "main.py"]
