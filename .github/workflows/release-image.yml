@@ -50,8 +50,8 @@ jobs:
           push: true
           # 在这里指定你需要支持的架构
           platforms: linux/amd64,linux/arm64
-          tags: ${{ id.meta.outputs.tags }}
-          labels: ${{ id.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           # 缓存优化，加快下次构建速度
           cache-from: type=gha
           cache-to: type=gha,mode=max
