@@ -475,7 +475,7 @@ class DidaScheduler:
                 return "⚠️ 未找到目标任务，请检查 task_id 或标题。"
             
             target_task_id = task_obj["id"]
-            target_project_id = pid
+            target_project_id = str(task_obj.get("projectId") or pid).strip()
 
             if action_type == "delete":
                 await asyncio.to_thread(service.delete_task, access_token=access_token, project_id=target_project_id, task_id=target_task_id)

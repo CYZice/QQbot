@@ -58,6 +58,7 @@ class DidaService:
             "DELETE",
             f"/project/{project_id}/task/{task_id}",
             access_token=access_token,
+            headers={"Content-Type": "application/json"},
         )
 
     def complete_task(self, *, access_token: str, project_id: str, task_id: str) -> dict[str, Any]:
@@ -74,10 +75,13 @@ class DidaService:
         *,
         access_token: str,
         data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
-        headers = {"Authorization": f"Bearer {access_token}"}
-        return self._request_json(method, url, headers=headers, data=data)
+        final_headers = {"Authorization": f"Bearer {access_token}"}
+        if headers:
+            final_headers.update(headers)
+        return self._request_json(method, url, headers=final_headers, data=data)
 
     def _request_json(
         self,
