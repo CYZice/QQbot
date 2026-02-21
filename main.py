@@ -22,12 +22,6 @@ async def on_private_message(msg: PrivateMessage):
 async def on_group_message(msg: GroupMessage):
     if await dida_scheduler.handle_command(msg):
         return
-
-    if msg.user_id == QQnumber and msg.raw_message.strip() == "/summary":
-        await bot.api.post_group_msg(msg.group_id, text="收到 /summary，正在执行一次手动总结… 结果将发送至私聊。")
-        await daily_summary(run_mode="manual")
-        return
-
     await enqueue_auto_reply_if_monitored(msg, chat_type="group")
     await process_group_message(msg)
     await enqueue_forward_by_monitor_group(msg)
