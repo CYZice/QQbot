@@ -195,7 +195,6 @@ class DidaScheduler:
             return_exceptions=True
         )
 
-        # First pass: Exact ID or Title match
         for i, res in enumerate(tasks_list):
             if not isinstance(res, dict):
                 continue
@@ -213,81 +212,8 @@ class DidaScheduler:
                 
                 if not task_id and title and ttitle == title:
                     return task, pid
-        
-        return None, None
-
-    async def get_user_active_tasks(self, user_id: str) -> list[dict[str, str]]:
-        """
-        Retrieves all active tasks for a user across all projects.
-        Returns a simplified list of dicts: {'id': task_id, 'title': title, 'project_id': project_id, 'due_date': due_date}
-        """
-        service = self._get_service()
-        if service is None:
-            return []
-            
-        user_key = str(user_id).strip()
-        tokens = self.load_tokens()
-        token_data = tokens.get(user_key)
-        if not isinstance(token_data, dict):
-            return []
-            
-        access_token = str(token_data.get("access_token") or "").strip()
-        if not access_token:
-            return []
-
-        try:
-            # 1. Get all projects
-            projects = await asyncio.to_thread(service.get_projects, access_token=access_token)
-            target_project_ids = []
-            if isinstance(projects, list):
-                target_project_ids = [str(p.get("id") or "").strip() for p in projects if p.get("id")]
-            if "inbox" not in target_project_ids:
-                target_project_ids.append("inbox")
-
-            # 2. Fetch tasks in parallel
-            tasks_list = await asyncio.gather(
-                *[
-                    asyncio.to_thread(service.get_project_data, access_token=access_token, project_id=pid)
-                    for pid in target_project_ids
-                ],
-                return_exceptions=True
-            )
-
-            all_tasks = []
-            for i, res in enumerate(tasks_list):
-                if not isinstance(res, dict):
-                    continue
-                pid = target_project_ids[i]
-                project_tasks = res.get("tasks", [])
-                if not isinstance(project_tasks, list):
-                    continue
-                
-                project_info = res.get("project", {})
-                p_name = str(project_info.get("name", "") or "").strip()
-                if not p_name:
-                    p_name = "收集箱" if pid == "inbox" else "未命名项目"
-
-                for task in project_tasks:
-                    # Filter only active (uncompleted) tasks if needed, usually status==0
-                    if str(task.get("status", "0")) != "0":
-                        continue
-                        
-                    tid = str(task.get("id", "") or "").strip()
-                    ttitle = str(task.get("title", "") or "").strip()
-                    due = str(task.get("dueDate", "") or "").strip()
                     
-                    if tid and ttitle:
-                        all_tasks.append({
-                            "id": tid,
-                            "title": ttitle,
-                            "project_id": pid,
-                            "project_name": p_name,
-                            "due_date": due
-                        })
-            return all_tasks
-        except Exception as e:
-            self._log(f"get_user_active_tasks_failed user={user_id} error={e}")
-            return []
+        return None, None
 
     async def execute_action(
         self,
@@ -310,17 +236,13 @@ class DidaScheduler:
         if not access_token:
             return "⚠️ Dida 授权信息无效，请重新绑定 /dida_auth。"
         project_id = str(getattr(action, "project_id", "") or "").strip()
-        # Note: We do NOT force default project_id here anymore, to allow global search for update/delete/complete.
-        # Only 'create' action will force a default project_id if missing.
-
+        if not project_id:
+            project_id = await self._ensure_default_project_id(user_key, token_data, service)
+            if project_id:
+                self.save_tokens(tokens)
         action_type = str(getattr(action, "action_type", "") or "").strip()
-        self._log(f"action_start type={action_type or 'unknown'} user={user_key} project={project_id or 'global'}")
+        self._log(f"action_start type={action_type or 'unknown'} user={user_key} project={project_id or 'default'}")
         if action_type == "create":
-            if not project_id:
-                project_id = await self._ensure_default_project_id(user_key, token_data, service)
-                if project_id:
-                    self.save_tokens(tokens)
-
             title = str(getattr(action, "title", "") or "").strip()
             if not title:
                 return "⚠️ 创建任务需要 title。"
@@ -628,7 +550,6 @@ class DidaScheduler:
 
     def _save_task_context(self, user_id: str, tasks: list[dict[str, Any]]) -> None:
         try:
-            os.makedirs("data", exist_ok=True)
             path = os.path.join("data", "dida_context.json")
             # Simple implementation: Overwrite with latest user data (assuming single user mainly or merging)
             # For multi-user, we might want a dict keyed by user_id
@@ -689,6 +610,58 @@ class DidaScheduler:
             if project_id:
                 token_data["default_project_id"] = project_id
                 return project_id
+        return ""
+
+    async def _find_task_by_id(
+        self,
+        access_token: str,
+        service: DidaService,
+        task_id: str,
+        project_id: str | None = None,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """
+        Find a task by ID across projects (including inbox).
+        """
+        if not task_id:
+            return None, ""
+
+        target_projects = []
+        if project_id:
+            target_projects = [project_id]
+        else:
+            projects = await asyncio.to_thread(service.get_projects, access_token=access_token)
+            if isinstance(projects, list):
+                target_projects = [str(p.get("id")) for p in projects if p.get("id")]
+            if "inbox" not in target_projects:
+                target_projects.append("inbox")
+        
+        for pid in target_projects:
+            data = await asyncio.to_thread(service.get_project_data, access_token=access_token, project_id=pid)
+            tasks = data.get("tasks", []) if isinstance(data, dict) else []
+            for task in tasks:
+                t_id = str(task.get("id") or "")
+                if t_id == task_id:
+                    return task, pid
+        return None, ""
+
+    async def _find_project_id_for_task(
+        self,
+        access_token: str,
+        task_id: str,
+        service: DidaService,
+    ) -> str:
+        projects = await asyncio.to_thread(service.get_projects, access_token=access_token)
+        if not isinstance(projects, list):
+            return ""
+        for project in projects:
+            project_id = str(project.get("id") or "").strip()
+            if not project_id:
+                continue
+            data = await asyncio.to_thread(service.get_project_data, access_token=access_token, project_id=project_id)
+            tasks = data.get("tasks", []) if isinstance(data, dict) else []
+            for task in tasks:
+                if str(task.get("id") or "") == task_id:
+                    return project_id
         return ""
 
 

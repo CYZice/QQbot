@@ -17,8 +17,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
-import instructor
-from openai import AsyncOpenAI
 
 from agent_pool import submit_agent_job
 from bot import bot
@@ -522,27 +520,6 @@ async def _execute_auto_reply_payload(payload: dict[str, str]) -> None:
         dida_action = result.get("dida_action")
         dida_response = ""
         if dida_action is not None:
-            # New Logic: Fuzzy matching for update/delete/complete if task_id is missing
-            action_type = str(getattr(dida_action, "action_type", "")).strip().lower()
-            current_task_id = str(getattr(dida_action, "task_id", "") or "").strip()
-            
-            if action_type in ("update", "delete", "complete") and not current_task_id:
-                try:
-                    active_tasks = await dida_scheduler.get_user_active_tasks(user_id)
-                    # Use cleaned_message for better matching context
-                    fuzzy_model = str(AUTO_REPLY_CONFIG.get("model") or "qwen3-max-2026-01-23")
-                    fuzzy_id = await run_task_fuzzy_match(
-                        cleaned_message, 
-                        active_tasks, 
-                        _get_client(),
-                        model_name=fuzzy_model
-                    )
-                    if fuzzy_id:
-                        dida_action.task_id = fuzzy_id
-                        print(f"[AUTO_REPLY] Fuzzy matched task_id={fuzzy_id} for input='{cleaned_message}' using model={fuzzy_model}")
-                except Exception as fuzzy_error:
-                    print(f"[AUTO_REPLY-FUZZY-ERROR] error={fuzzy_error}")
-
             try:
                 dida_response = await dida_scheduler.execute_action(
                     action=dida_action,
@@ -747,72 +724,6 @@ class AutoReplyGeneratedReply(BaseModel):
     dida_action: Optional[DidaAction] = Field(default=None, description="Dida 动作")
 
 
-class DidaTaskFuzzyMatch(BaseModel):
-    task_id: Optional[str] = Field(default=None, description="The exact ID of the matching task, or None if no match")
-    reason: Optional[str] = Field(default=None, description="Reasoning for the match")
-
-
-async def run_task_fuzzy_match(
-    user_input: str, 
-    tasks: list[dict[str, str]], 
-    client: instructor.AsyncInstructor,
-    model_name: str = "qwen3-max-2026-01-23",
-) -> str | None:
-    """
-    Uses LLM to find the best matching task ID given user input and a list of tasks.
-    """
-    if not tasks:
-        return None
-        
-    # Simplify task list for prompt to save tokens
-    tasks_str = "\n".join([f"- [{t.get('project_name', 'Unknown')}] {t['title']} (ID: {t['id']}, Due: {t.get('due_date','None')})" for t in tasks])
-    
-    prompt = f"""
-    You are a task matching assistant.
-    User Input: "{user_input}"
-    
-    Current Active Tasks:
-    {tasks_str}
-    
-    Find the single task that best matches the user's intent to update/complete/delete.
-    If the user refers to a task by approximate name, pick the most likely one.
-    If no task matches reasonably well, return null.
-    
-    Return the task_id only.
-    """
-    
-    try:
-        resp = await client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that matches user requests to task IDs."},
-                {"role": "user", "content": prompt}
-            ],
-            response_model=DidaTaskFuzzyMatch,
-            temperature=0.0,
-        )
-        return resp.task_id
-    except Exception as e:
-        print(f"[FuzzyMatch] error={e}")
-        return None
-
-
-def _get_client() -> instructor.AsyncInstructor:
-    """Helper to get instructor client for fuzzy matching."""
-    load_dotenv(override=False)
-    api_key = os.getenv("LLM_API_KEY")
-    base_url = os.getenv("LLM_API_BASE_URL")
-    
-    client = instructor.from_openai(
-        AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-        ),
-        mode=instructor.Mode.JSON,
-    )
-    return client
-
-
 class AutoReplyAIState(TypedDict):
     prompt: str
     chat_type: str
@@ -848,7 +759,7 @@ class AutoReplyDecisionEngine:
         self.config = config if isinstance(config, dict) else {}
         raw_rules = self.config.get("rules", [])
         self.rules = [rule for rule in raw_rules if isinstance(rule, dict) and bool(rule.get("enabled", False))]
-        self.model = str(self.config.get("model") or "qwen3-max-2026-01-23")
+        self.model = str(self.config.get("model") or "gpt-4o-mini")
         try:
             self.temperature = float(self.config.get("temperature", 0.0))
         except (TypeError, ValueError):
@@ -1093,6 +1004,8 @@ class AutoReplyDecisionEngine:
         return False, reason or "ai_decide=false"
 
     def generate_reply_text(
+        self,
+        *,
         reply_prompt: str,
         context: AutoReplyMessageContext,
         rule: dict[str, Any] | None = None,

@@ -222,7 +222,7 @@ def run_forward_graph(
         raise ValueError("缺少 LLM_API_KEY，请在 .env 中配置")
 
     base_url = os.getenv("LLM_API_BASE_URL")
-    model_name = str(FORWARD_AGENT_CONFIG.get("model") or "qwen3-max-2026-01-23")
+    model_name = str(FORWARD_AGENT_CONFIG.get("model") or "gpt-4o-mini")
     try:
         temperature = float(FORWARD_AGENT_CONFIG.get("temperature", 0.0))
     except (TypeError, ValueError):

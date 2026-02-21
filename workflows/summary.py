@@ -73,7 +73,7 @@ try:
 except (TypeError, ValueError):
     DEFAULT_MAX_LINES = 500
 
-DEFAULT_LLM_MODEL = str(SUMMARY_AGENT_CONFIG.get("model") or "qwen3-max-2026-01-23")
+DEFAULT_LLM_MODEL = str(SUMMARY_AGENT_CONFIG.get("model") or "gpt-4o-mini")
 try:
     DEFAULT_LLM_TEMPERATURE = float(SUMMARY_AGENT_CONFIG.get("temperature", 0.2))
 except (TypeError, ValueError):
@@ -298,7 +298,6 @@ def build_summary_chunks_from_log_lines(
     *,
     chunk_size: int,
     run_mode: str,
-    target_date: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """从日志原始行构建 summary chunks（解析+筛选+分块）。"""
     records: list[dict[str, str]] = []
@@ -315,11 +314,7 @@ def build_summary_chunks_from_log_lines(
             }
         )
 
-    filtered_records, meta = filter_records_for_summary(
-        records,
-        run_mode=run_mode,
-        target_date=target_date,
-    )
+    filtered_records, meta = filter_records_for_summary(records, run_mode=run_mode)
     if not filtered_records:
         return [], meta
 
@@ -381,7 +376,6 @@ def filter_records_for_summary(
     records: list[dict[str, str]],
     *,
     run_mode: str,
-    target_date: str | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, str]]:
     """按 chat scope + cursor 筛选日志记录。"""
     scope = _normalize_scope(str(SUMMARY_AGENT_CONFIG.get("summary_chat_scope") or "group"))
@@ -400,11 +394,8 @@ def filter_records_for_summary(
     if normalized_run_mode not in {"manual", "auto"}:
         normalized_run_mode = "manual"
 
-    use_cursor = (normalized_run_mode == "manual") and (not target_date)
+    use_cursor = normalized_run_mode == "manual"
     today_str = datetime.now().astimezone().strftime("%Y-%m-%d")
-    
-    # 如果指定了 target_date，优先使用 target_date 进行过滤
-    filter_date_str = target_date if target_date else None
 
     if use_cursor:
         cursor_before = load_summary_cursor(cursor_key)
@@ -427,17 +418,11 @@ def filter_records_for_summary(
 
         ts = str(record.get("ts", "")).strip()
         current_dt = _parse_iso_dt(ts)
-        
-        # 1. 如果指定了 target_date，只保留该日期的消息
-        if filter_date_str:
-            if current_dt is None or current_dt.astimezone().strftime("%Y-%m-%d") != filter_date_str:
-                continue
-        # 2. 如果是 auto 模式（且无 target_date），只保留今天的消息
-        elif normalized_run_mode == "auto":
+        if normalized_run_mode == "auto":
             if current_dt is None or current_dt.astimezone().strftime("%Y-%m-%d") != today_str:
                 continue
-        # 3. 如果是 manual 模式（且无 target_date），使用 cursor 过滤
-        elif use_cursor and cursor_dt is not None:
+
+        if use_cursor and cursor_dt is not None:
             if current_dt is None or current_dt <= cursor_dt:
                 continue
 
@@ -462,7 +447,6 @@ def filter_records_for_summary(
         "cursor_key": cursor_key,
         "cursor_before": cursor_before,
         "cursor_after": cursor_after,
-        "target_date": str(target_date) if target_date else "",
     }
 
 
@@ -590,7 +574,6 @@ def run_summary_graph(
     chunk_index: int = 1,
     model_name: str | None = None,
     temperature: float = DEFAULT_LLM_TEMPERATURE,
-    target_date: str | None = None,
 ) -> SummaryFinalResult:
     """运行 summary 的 LangGraph 核心流程（当前为最少节点两步）。
 
@@ -601,11 +584,7 @@ def run_summary_graph(
     workflow_started_at = perf_counter()
     payload = prepare_summary_payload(raw_message)
 
-    graph = _build_summary_graph(
-        model_name=model_name,
-        temperature=temperature,
-        target_date=target_date,
-    )
+    graph = _build_summary_graph(model_name=model_name, temperature=temperature)
     result = graph.invoke(
         {
             "payload": payload,
@@ -629,11 +608,10 @@ def run_grouped_summary_graph(
     *,
     model_name: str | None = None,
     temperature: float = DEFAULT_LLM_TEMPERATURE,
-    target_date: str | None = None,
 ) -> GroupedSummaryResult:
     """按群执行 summary（每群可含多个 chunk），并聚合为单次输出结果。"""
     started_at = perf_counter()
-    today_text = target_date if target_date else datetime.now().strftime("%Y-%m-%d")
+    today_text = datetime.now().strftime("%Y-%m-%d")
     group_results: list[GroupSummaryResult] = []
     total_chunks = 0
     total_messages = 0
@@ -664,7 +642,6 @@ def run_grouped_summary_graph(
                     chunk_index=chunk_index,
                     model_name=model_name,
                     temperature=temperature,
-                    target_date=target_date,
                 )
             )
 
@@ -1035,7 +1012,7 @@ async def process_private_message(msg: PrivateMessage) -> None:
         )
 
 
-async def _execute_daily_summary(run_mode: str = "manual", target_date: str | None = None) -> None:
+async def _execute_daily_summary(run_mode: str = "manual") -> None:
     file_path = LOG_FILE_PATH
     chunk_size = 10000
     print(f"开始读取日志: {file_path}")
@@ -1053,7 +1030,6 @@ async def _execute_daily_summary(run_mode: str = "manual", target_date: str | No
             raw_lines,
             chunk_size=chunk_size,
             run_mode=run_mode,
-            target_date=target_date,
         )
         if not group_jobs:
             print(
@@ -1137,8 +1113,8 @@ async def _execute_daily_summary(run_mode: str = "manual", target_date: str | No
         print(f"处理日志时出错: {error}")
 
 
-async def daily_summary(run_mode: str = "manual", target_date: str | None = None) -> None:
-    task = asyncio.create_task(_execute_daily_summary(run_mode=run_mode, target_date=target_date))
+async def daily_summary(run_mode: str = "manual") -> None:
+    task = asyncio.create_task(_execute_daily_summary(run_mode=run_mode))
 
     def _on_done(done_task: asyncio.Task) -> None:
         try:
@@ -1149,12 +1125,7 @@ async def daily_summary(run_mode: str = "manual", target_date: str | None = None
     task.add_done_callback(_on_done)
 
 
-def _build_summary_graph(
-    *,
-    model_name: str | None,
-    temperature: float,
-    target_date: str | None = None,
-):
+def _build_summary_graph(*, model_name: str | None, temperature: float):
     """
     Agent核心流程Graph构建
     """
@@ -1219,7 +1190,7 @@ def _build_summary_graph(
 
         source_refs, _source_details, trace_lines = _analyze_blocks(payload.blocks)
         final_result = SummaryFinalResult(
-            date=target_date if target_date else datetime.now().strftime("%Y-%m-%d"),
+            date=datetime.now().strftime("%Y-%m-%d"),
             overview=map_result.overview,
             highlights=map_result.highlights,
             risks=map_result.risks,
