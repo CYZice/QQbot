@@ -73,7 +73,7 @@ try:
 except (TypeError, ValueError):
     DEFAULT_MAX_LINES = 500
 
-DEFAULT_LLM_MODEL = str(SUMMARY_AGENT_CONFIG.get("model") or "gpt-4o-mini")
+DEFAULT_LLM_MODEL = str(SUMMARY_AGENT_CONFIG.get("model") or "qwen3-max-2026-01-23")
 try:
     DEFAULT_LLM_TEMPERATURE = float(SUMMARY_AGENT_CONFIG.get("temperature", 0.2))
 except (TypeError, ValueError):

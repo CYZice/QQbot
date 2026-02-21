@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import perf_counter
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, TypedDict
+from typing import Any, Awaitable, Callable, Literal, Optional, TypedDict
 import json
 import os
 import re
@@ -17,11 +17,14 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
+import instructor
+from openai import AsyncOpenAI
 
 from agent_pool import submit_agent_job
 from bot import bot
 from workflows.agent_observe import bind_agent_event, generate_run_id
 from workflows.agent_config_loader import load_current_agent_config
+from workflows.dida_scheduler import dida_scheduler
 
 try:
     from dotenv import load_dotenv
@@ -516,15 +519,52 @@ async def _execute_auto_reply_payload(payload: dict[str, str]) -> None:
         should_reply_flag = bool(result.get("should_reply", False))
         reason_text = str(result.get("reason", ""))
         reply_text = str(result.get("reply_text", "") or "").strip()
+        dida_action = result.get("dida_action")
+        dida_response = ""
+        if dida_action is not None:
+            # New Logic: Fuzzy matching for update/delete/complete if task_id is missing
+            action_type = str(getattr(dida_action, "action_type", "")).strip().lower()
+            current_task_id = str(getattr(dida_action, "task_id", "") or "").strip()
+            
+            if action_type in ("update", "delete", "complete") and not current_task_id:
+                try:
+                    active_tasks = await dida_scheduler.get_user_active_tasks(user_id)
+                    # Use cleaned_message for better matching context
+                    fuzzy_model = str(AUTO_REPLY_CONFIG.get("model") or "qwen3-max-2026-01-23")
+                    fuzzy_id = await run_task_fuzzy_match(
+                        cleaned_message, 
+                        active_tasks, 
+                        _get_client(),
+                        model_name=fuzzy_model
+                    )
+                    if fuzzy_id:
+                        dida_action.task_id = fuzzy_id
+                        print(f"[AUTO_REPLY] Fuzzy matched task_id={fuzzy_id} for input='{cleaned_message}' using model={fuzzy_model}")
+                except Exception as fuzzy_error:
+                    print(f"[AUTO_REPLY-FUZZY-ERROR] error={fuzzy_error}")
 
-        if should_reply_flag and reply_text:
-            log_event(stage="send_start", extra={"reply_length": len(reply_text)})
+            try:
+                dida_response = await dida_scheduler.execute_action(
+                    action=dida_action,
+                    chat_type=chat_type,
+                    group_id=group_id,
+                    user_id=user_id,
+                    user_name=user_name,
+                )
+            except Exception as action_error:
+                dida_response = f"⚠️ Dida 操作失败：{action_error}"
+        final_reply = reply_text
+        if dida_response:
+            final_reply = f"{reply_text}\n{dida_response}".strip() if reply_text else dida_response.strip()
+
+        if should_reply_flag and final_reply:
+            log_event(stage="send_start", extra={"reply_length": len(final_reply)})
             try:
                 if chat_type == "group":
-                    await bot.api.post_group_msg(group_id, text=reply_text)
+                    await bot.api.post_group_msg(group_id, text=final_reply)
                 else:
-                    await bot.api.post_private_msg(user_id, text=reply_text)
-                log_event(stage="send_end", decision={"sent": True, "reply_length": len(reply_text)})
+                    await bot.api.post_private_msg(user_id, text=final_reply)
+                log_event(stage="send_end", decision={"sent": True, "reply_length": len(final_reply)})
             except Exception as send_error:
                 log_event(stage="send_error", error=str(send_error))
                 print(
@@ -538,7 +578,7 @@ async def _execute_auto_reply_payload(payload: dict[str, str]) -> None:
             "[AUTO_REPLY] "
             f"chat={chat_type} group={group_id} user={user_name}({user_id}) "
             f"should_reply={should_reply_flag} "
-            f"reason={reason_text} reply_len={len(reply_text)}"
+            f"reason={reason_text} reply_len={len(final_reply)}"
         )
     except Exception as error:
         elapsed_ms = (perf_counter() - started) * 1000
@@ -687,8 +727,90 @@ class AutoReplyAIDecision(BaseModel):
     reason: str = Field(default="", description="判定理由")
 
 
+class DidaAction(BaseModel):
+    action_type: Literal["create", "list", "delete", "complete", "update"] = Field(description="Dida 动作类型")
+    title: Optional[str] = Field(default=None, description="任务标题")
+    due_date: Optional[str] = Field(default=None, description="到期时间")
+    task_id: Optional[str] = Field(default=None, description="任务 ID")
+    project_id: Optional[str] = Field(default=None, description="项目 ID")
+    content: Optional[str] = Field(default=None, description="任务内容")
+    desc: Optional[str] = Field(default=None, description="任务描述")
+    is_all_day: Optional[bool] = Field(default=None, description="是否全天")
+    time_zone: Optional[str] = Field(default=None, description="时区")
+    repeat_flag: Optional[str] = Field(default=None, description="重复规则")
+    reminders: Optional[list[str]] = Field(default=None, description="提醒数组")
+    limit: Optional[int] = Field(default=None, description="列表数量")
+
+
 class AutoReplyGeneratedReply(BaseModel):
     reply_text: str = Field(default="", description="自动回复文本")
+    dida_action: Optional[DidaAction] = Field(default=None, description="Dida 动作")
+
+
+class DidaTaskFuzzyMatch(BaseModel):
+    task_id: Optional[str] = Field(default=None, description="The exact ID of the matching task, or None if no match")
+    reason: Optional[str] = Field(default=None, description="Reasoning for the match")
+
+
+async def run_task_fuzzy_match(
+    user_input: str, 
+    tasks: list[dict[str, str]], 
+    client: instructor.AsyncInstructor,
+    model_name: str = "qwen3-max-2026-01-23",
+) -> str | None:
+    """
+    Uses LLM to find the best matching task ID given user input and a list of tasks.
+    """
+    if not tasks:
+        return None
+        
+    # Simplify task list for prompt to save tokens
+    tasks_str = "\n".join([f"- [ID: {t['id']}] {t['title']} (Due: {t.get('due_date','None')})" for t in tasks])
+    
+    prompt = f"""
+    You are a task matching assistant.
+    User Input: "{user_input}"
+    
+    Current Active Tasks:
+    {tasks_str}
+    
+    Find the single task that best matches the user's intent to update/complete/delete.
+    If the user refers to a task by approximate name, pick the most likely one.
+    If no task matches reasonably well, return null.
+    
+    Return the task_id only.
+    """
+    
+    try:
+        resp = await client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that matches user requests to task IDs."},
+                {"role": "user", "content": prompt}
+            ],
+            response_model=DidaTaskFuzzyMatch,
+            temperature=0.0,
+        )
+        return resp.task_id
+    except Exception as e:
+        print(f"[FuzzyMatch] error={e}")
+        return None
+
+
+def _get_client() -> instructor.AsyncInstructor:
+    """Helper to get instructor client for fuzzy matching."""
+    load_dotenv(override=False)
+    api_key = os.getenv("LLM_API_KEY")
+    base_url = os.getenv("LLM_API_BASE_URL")
+    
+    client = instructor.from_openai(
+        AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+        ),
+        mode=instructor.Mode.JSON,
+    )
+    return client
 
 
 class AutoReplyAIState(TypedDict):
@@ -716,6 +838,7 @@ class AutoReplyGenerateState(TypedDict):
     cleaned_message: str
     history_messages: list[str]
     reply_text: str
+    dida_action: Optional[DidaAction]
 
 
 class AutoReplyDecisionEngine:
@@ -725,7 +848,7 @@ class AutoReplyDecisionEngine:
         self.config = config if isinstance(config, dict) else {}
         raw_rules = self.config.get("rules", [])
         self.rules = [rule for rule in raw_rules if isinstance(rule, dict) and bool(rule.get("enabled", False))]
-        self.model = str(self.config.get("model") or "gpt-4o-mini")
+        self.model = str(self.config.get("model") or "qwen3-max-2026-01-23")
         try:
             self.temperature = float(self.config.get("temperature", 0.0))
         except (TypeError, ValueError):
@@ -970,15 +1093,44 @@ class AutoReplyDecisionEngine:
         return False, reason or "ai_decide=false"
 
     def generate_reply_text(
-        self,
-        *,
         reply_prompt: str,
         context: AutoReplyMessageContext,
         rule: dict[str, Any] | None = None,
-    ) -> str:
+    ) -> dict[str, Any]:
         prompt = str(reply_prompt).strip()
+        
+        # Inject Dida task context if available
+        try:
+            context_path = os.path.join("data", "dida_context.json")
+            if os.path.exists(context_path):
+                with open(context_path, "r", encoding="utf-8") as f:
+                    dida_data = json.load(f)
+                    
+                task_context_lines = []
+                # Check for user-specific context or fallback to all
+                # The keys in dida_context.json are internal user IDs (e.g., from dida_tokens.json)
+                # Since auto_reply doesn't know the internal ID mapping easily without auth,
+                # we will include all available tasks from the context file.
+                # In a single-user/couple bot scenario, this is usually fine.
+                
+                for uid, tasks in dida_data.items():
+                    if not isinstance(tasks, list) or not tasks:
+                        continue
+                    for t in tasks:
+                        tid = str(t.get("id") or "")
+                        ttitle = str(t.get("title") or "")
+                        tproject = str(t.get("project") or "")
+                        tdue = str(t.get("due") or "无到期")
+                        # Format: [Project] Title (ID: ...) Due: ...
+                        task_context_lines.append(f"- [{tproject}] {ttitle} (ID: {tid}) Due: {tdue}")
+                
+                if task_context_lines:
+                    prompt += "\n\n【当前 Dida 任务列表（仅供 AI 参考，不要泄露 ID 给用户，但在调用工具时必须使用 ID）】:\n" + "\n".join(task_context_lines)
+        except Exception as e:
+            pass # Ignore context loading errors
+
         if not prompt:
-            return ""
+            return {"reply_text": "", "dida_action": None}
 
         model_name = str(rule.get("reply_model") or rule.get("model") or self.model) if rule else self.model
 
@@ -1043,6 +1195,7 @@ class AutoReplyDecisionEngine:
                 return {
                     **state,
                     "reply_text": fallback_reply or _default_reply_when_parse_failed(),
+                    "dida_action": None,
                 }
             if use_raw_fallback and isinstance(result, dict):
                 parsed = result.get("parsed")
@@ -1050,6 +1203,7 @@ class AutoReplyDecisionEngine:
                     return {
                         **state,
                         "reply_text": str(getattr(parsed, "reply_text", "") or "").strip(),
+                        "dida_action": getattr(parsed, "dida_action", None),
                     }
                 raw_output = result.get("raw")
                 fallback_reply = _extract_reply_text_from_raw_output(raw_output)
@@ -1057,27 +1211,32 @@ class AutoReplyDecisionEngine:
                     return {
                         **state,
                         "reply_text": fallback_reply,
+                        "dida_action": None,
                     }
                 parse_error = result.get("parsing_error")
                 if parse_error:
                     return {
                         **state,
                         "reply_text": _default_reply_when_parse_failed(),
+                        "dida_action": None,
                     }
                 return {
                     **state,
                     "reply_text": _default_reply_when_parse_failed(),
+                    "dida_action": None,
                 }
             structured_reply = str(getattr(result, "reply_text", "") or "").strip()
             if structured_reply:
                 return {
                     **state,
                     "reply_text": structured_reply,
+                    "dida_action": getattr(result, "dida_action", None),
                 }
             fallback_reply = _extract_reply_text_from_raw_output(result)
             return {
                 **state,
                 "reply_text": fallback_reply or _default_reply_when_parse_failed(),
+                "dida_action": None,
             }
 
         graph = StateGraph(AutoReplyGenerateState)
@@ -1113,12 +1272,14 @@ class AutoReplyDecisionEngine:
                 "cleaned_message": context.cleaned_message,
                 "history_messages": context.history_messages,
                 "reply_text": "",
+                "dida_action": None,
             }
         )
 
         reply_text = str(final_state.get("reply_text", "")).strip()
+        dida_action = final_state.get("dida_action")
         context_event(stage="reply_generate_end", decision={"reply_length": len(reply_text), "has_reply": bool(reply_text)})
-        return reply_text
+        return {"reply_text": reply_text, "dida_action": dida_action}
 
 
 def run_auto_reply_pipeline(
@@ -1185,21 +1346,27 @@ def run_auto_reply_pipeline(
     result = engine.should_reply(context)
 
     # 然后生成具体的回复内容文本
-    reply_text = ""
+    reply_payload: dict[str, Any] = {"reply_text": "", "dida_action": None}
     if bool(result.get("should_reply", False)):
         reply_prompt = str(result.get("reply_prompt", "")).strip()
         if reply_prompt:
             rule = result.get("rule")
             try:
-                reply_text = engine.generate_reply_text(reply_prompt=reply_prompt, context=context, rule=rule)
+                reply_payload = engine.generate_reply_text(reply_prompt=reply_prompt, context=context, rule=rule)
             except Exception as error:
                 context_event(stage="reply_generate_error", error=str(error))
+    dida_action = reply_payload.get("dida_action")
+    rule = result.get("rule") if isinstance(result.get("rule"), dict) else {}
+    if not bool(rule.get("dida_enabled", False)):
+        dida_action = None
+        reply_payload["dida_action"] = None
     return {
         "should_reply": bool(result.get("should_reply", False)),
         "reason": str(result.get("reason", "")),
         "matched_rule": result.get("matched_rule"),
         "trigger_mode": result.get("trigger_mode", ""),
-        "reply_text": reply_text,
+        "reply_text": str(reply_payload.get("reply_text", "") or ""),
+        "dida_action": dida_action,
         "chat_type": context.chat_type,
         "group_id": context.group_id,
         "user_id": context.user_id,
