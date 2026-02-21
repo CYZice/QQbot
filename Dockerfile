@@ -5,12 +5,12 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /build
 
-# 1. 升级基础工具，确保安装过程安全
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel jaraco.context
+# 1. 升级构建工具，确保安装过程安全
+RUN pip install --no-cache-dir --upgrade pip setuptools "wheel>=0.46.2" "jaraco.context>=6.1.0"
 
-# 2. 安装依赖到指定目录 (--user 会安装到 /root/.local)
+# 2. 安装依赖到临时目录
 COPY requirements.txt .
-RUN pip install --user --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 
 # ==========================================
@@ -18,27 +18,26 @@ RUN pip install --user --no-cache-dir -r requirements.txt
 # ==========================================
 FROM python:3.11-slim
 
-# 1. 设置环境变量
+# 1. 运行时环境变量
 ENV TZ=Asia/Shanghai \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    # 将 Python 寻找包的路径指向从 builder 拷贝过来的目录
-    PATH=/root/.local/bin:$PATH \
-    PYTHONPATH=/root/.local/lib/python3.11/site-packages
+    # 将安装路径加入 Python 搜索路径
+    PATH="/usr/local/lib/python3.11/site-packages:$PATH"
 
 WORKDIR /app
 
-# 2. 从构建阶段只拷贝安装好的 Python 包
-# 这一步非常关键：它避开了 builder 镜像中可能存在的旧版 wheel 元数据
-COPY --from=builder /root/.local /root/.local
+# 2. 【核心修复步骤】
+# 即使以 Root 运行，Trivy 依然会扫描基础镜像中的旧版文件。
+# 在 Final 阶段直接升级这两个包，会产生一个新层覆盖掉基础镜像中的漏洞版本。
+RUN pip install --no-cache-dir --upgrade "wheel>=0.46.2" "jaraco.context>=6.1.0"
 
-# 3. 拷贝项目文件
+# 3. 从构建阶段拷贝所有已安装的业务依赖
+COPY --from=builder /install /usr/local
+
+# 4. 拷贝项目文件
+# 默认就是 Root 权限，无需额外 chmod
 COPY . .
 
-# 4. 权限与目录处理
-# 显式创建需要的文件夹并设置权限
-RUN mkdir -p /app/data /app/logs && \
-    chmod -R 755 /app
-
-# 5. 启动命令
+# 5. 启动命令 (默认以 Root 身份运行)
 CMD ["python", "main.py"]
