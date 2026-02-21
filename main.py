@@ -43,7 +43,7 @@ async def on_private_message(msg: PrivateMessage):
         target_date = None
         if len(parts) > 1:
             arg = parts[1].strip()
-            if arg in ["yesterday", "昨天"]:
+            if arg in ["yesterday"]:
                 target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
             else:
                 try:

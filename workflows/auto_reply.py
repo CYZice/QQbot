@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import perf_counter
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Literal, Optional, TypedDict
+from typing import Any, Awaitable, Callable, TypedDict
 import json
 import os
 import re
@@ -516,16 +516,15 @@ async def _execute_auto_reply_payload(payload: dict[str, str]) -> None:
         should_reply_flag = bool(result.get("should_reply", False))
         reason_text = str(result.get("reason", ""))
         reply_text = str(result.get("reply_text", "") or "").strip()
-        dida_response = ""
-        final_reply = reply_text
-        if should_reply_flag and final_reply:
-            log_event(stage="send_start", extra={"reply_length": len(final_reply)})
+
+        if should_reply_flag and reply_text:
+            log_event(stage="send_start", extra={"reply_length": len(reply_text)})
             try:
                 if chat_type == "group":
-                    await bot.api.post_group_msg(group_id, text=final_reply)
+                    await bot.api.post_group_msg(group_id, text=reply_text)
                 else:
-                    await bot.api.post_private_msg(user_id, text=final_reply)
-                log_event(stage="send_end", decision={"sent": True, "reply_length": len(final_reply)})
+                    await bot.api.post_private_msg(user_id, text=reply_text)
+                log_event(stage="send_end", decision={"sent": True, "reply_length": len(reply_text)})
             except Exception as send_error:
                 log_event(stage="send_error", error=str(send_error))
                 print(
@@ -539,7 +538,7 @@ async def _execute_auto_reply_payload(payload: dict[str, str]) -> None:
             "[AUTO_REPLY] "
             f"chat={chat_type} group={group_id} user={user_name}({user_id}) "
             f"should_reply={should_reply_flag} "
-            f"reason={reason_text} reply_len={len(final_reply)}"
+            f"reason={reason_text} reply_len={len(reply_text)}"
         )
     except Exception as error:
         elapsed_ms = (perf_counter() - started) * 1000
@@ -976,11 +975,10 @@ class AutoReplyDecisionEngine:
         reply_prompt: str,
         context: AutoReplyMessageContext,
         rule: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> str:
         prompt = str(reply_prompt).strip()
-
         if not prompt:
-            return {"reply_text": ""}
+            return ""
 
         model_name = str(rule.get("reply_model") or rule.get("model") or self.model) if rule else self.model
 
@@ -1120,7 +1118,7 @@ class AutoReplyDecisionEngine:
 
         reply_text = str(final_state.get("reply_text", "")).strip()
         context_event(stage="reply_generate_end", decision={"reply_length": len(reply_text), "has_reply": bool(reply_text)})
-        return {"reply_text": reply_text}
+        return reply_text
 
 
 def run_auto_reply_pipeline(
@@ -1187,22 +1185,21 @@ def run_auto_reply_pipeline(
     result = engine.should_reply(context)
 
     # 然后生成具体的回复内容文本
-    reply_payload: dict[str, Any] = {"reply_text": ""}
+    reply_text = ""
     if bool(result.get("should_reply", False)):
         reply_prompt = str(result.get("reply_prompt", "")).strip()
         if reply_prompt:
             rule = result.get("rule")
             try:
-                reply_payload = engine.generate_reply_text(reply_prompt=reply_prompt, context=context, rule=rule)
+                reply_text = engine.generate_reply_text(reply_prompt=reply_prompt, context=context, rule=rule)
             except Exception as error:
                 context_event(stage="reply_generate_error", error=str(error))
-    
     return {
         "should_reply": bool(result.get("should_reply", False)),
         "reason": str(result.get("reason", "")),
         "matched_rule": result.get("matched_rule"),
         "trigger_mode": result.get("trigger_mode", ""),
-        "reply_text": str(reply_payload.get("reply_text", "") or ""),
+        "reply_text": reply_text,
         "chat_type": context.chat_type,
         "group_id": context.group_id,
         "user_id": context.user_id,
