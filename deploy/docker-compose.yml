@@ -24,12 +24,12 @@ services:
     # 4. 卷挂载优化（关键修改点）
     volumes:
       # 配置文件和数据建议挂载
-      - ./bot.py:/app/bot.py:ro 
-      - ./config.yaml:/app/config.yaml 
-      - ./.env:/app/.env 
-      - ./workflows/agent_config.yaml:/app/workflows/agent_config.yaml:ro 
-      - ./message.jsonl:/app/message.jsonl 
-      - ./logs:/app/logs -
+      - ./config.yaml:/app/config.yaml:ro
+      - ./workflows/agent_config.yaml:/app/workflows/agent_config.yaml:ro
+      - ./message.jsonl:/app/message.jsonl
+      - ./logs:/app/logs
+      - ./data:/app/data
+      - ./plugins:/app/plugins
       
       # 注意：如果你的代码（bot.py, plugins）已经通过 GitHub Actions 打包进镜像了，
       # 除非你在做本地调试，否则不需要再挂载代码文件。
