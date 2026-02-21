@@ -4,6 +4,7 @@ from ncatbot.core import PrivateMessage, GroupMessage
 from agent_pool import setup_agent_pool
 from bot import bot, QQnumber
 from workflows.auto_reply import auto_reply_pending_worker, enqueue_auto_reply_if_monitored
+from workflows.dida_agent import dida_agent_pending_worker, enqueue_dida_agent_if_monitored
 from workflows.dida_scheduler import dida_scheduler
 from workflows.forward import enqueue_forward_by_monitor_group
 from workflows.summary import daily_summary, process_group_message, process_private_message
@@ -35,6 +36,7 @@ async def on_private_message(msg: PrivateMessage):
     if await dida_scheduler.handle_command(msg):
         return
     await enqueue_auto_reply_if_monitored(msg, chat_type="private")
+    await enqueue_dida_agent_if_monitored(msg, chat_type="private")
     await process_private_message(msg)
     if msg.user_id == QQnumber and msg.raw_message.strip().startswith("/summary"):
         parts = msg.raw_message.strip().split(maxsplit=1)
@@ -63,6 +65,7 @@ async def on_group_message(msg: GroupMessage):
     if await dida_scheduler.handle_command(msg):
         return
     await enqueue_auto_reply_if_monitored(msg, chat_type="group")
+    await enqueue_dida_agent_if_monitored(msg, chat_type="group")
     await process_group_message(msg)
     await enqueue_forward_by_monitor_group(msg)
     
@@ -70,6 +73,7 @@ async def on_group_message(msg: GroupMessage):
 async def on_startup(*args):
     await setup_agent_pool()
     asyncio.create_task(auto_reply_pending_worker())
+    asyncio.create_task(dida_agent_pending_worker())
     asyncio.create_task(dida_scheduler.start())
     aiocron.crontab('0 22 * * *', func=lambda: daily_summary(run_mode="auto"))
 

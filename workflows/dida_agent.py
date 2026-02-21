@@ -22,6 +22,7 @@ from agent_pool import submit_agent_job
 from bot import bot
 from workflows.agent_observe import bind_agent_event, generate_run_id
 from workflows.agent_config_loader import load_current_agent_config
+from workflows.dida_scheduler import dida_scheduler
 
 try:
     from dotenv import load_dotenv
@@ -32,8 +33,8 @@ except Exception:  # pragma: no cover
 AUTO_REPLY_CONFIG = load_current_agent_config(__file__)
 
 
-def get_auto_reply_runtime_config() -> dict[str, Any]:
-    """读取并规范化 auto_reply 运行时配置。"""
+def get_dida_agent_runtime_config() -> dict[str, Any]:
+    """读取并规范化 dida_agent 运行时配置。"""
 
     def int_config(name: str, default: int) -> int:
         try:
@@ -84,8 +85,8 @@ def _parse_timestamp_to_epoch_seconds(ts_text: str) -> float | None:
     return dt.timestamp()
 
 
-def get_auto_reply_monitor_numbers(chat_type: str = "group") -> set[str]:
-    """读取 auto_reply 配置里启用规则的监控号码集合。"""
+def get_dida_agent_monitor_numbers(chat_type: str = "group") -> set[str]:
+    """读取 dida_agent 配置里启用规则的监控号码集合。"""
     rules = AUTO_REPLY_CONFIG.get("rules", [])
     if not isinstance(rules, list):
         return set()
@@ -174,8 +175,8 @@ def _default_reply_when_parse_failed() -> str:
     return "抱歉，刚才回复格式异常，请再说一次，我马上继续。"
 
 
-class AutoReplyDispatcher:
-    """AutoReply 接入层：监控命中 + 冷却窗口 + pending 聚合/过期。"""
+class DidaAgentDispatcher:
+    """DidaAgent 接入层：监控命中 + 冷却窗口 + pending 聚合/过期。"""
 
     def __init__(self):
         self._state_lock = asyncio.Lock()
@@ -245,15 +246,15 @@ class AutoReplyDispatcher:
             return False
 
         normalized_monitor_value = str(monitor_value)
-        monitor_numbers = get_auto_reply_monitor_numbers(chat_type=target_chat_type)
+        monitor_numbers = get_dida_agent_monitor_numbers(chat_type=target_chat_type)
         if normalized_monitor_value not in monitor_numbers:
             return False
 
-        runtime_config = get_auto_reply_runtime_config()
+        runtime_config = get_dida_agent_runtime_config()
         min_reply_interval = max(int(runtime_config.get("min_reply_interval_seconds", 300)), 0)
         pending_max_messages = max(int(runtime_config.get("pending_max_messages", 50)), 1)
 
-        auto_reply_payload = self._build_payload(
+        dida_agent_payload = self._build_payload(
             raw_message=str(raw_message),
             cleaned_message=str(cleaned_message),
             chat_type=target_chat_type,
@@ -263,8 +264,8 @@ class AutoReplyDispatcher:
             ts=str(ts),
         )
         log_event = bind_agent_event(
-            agent_name="auto_reply",
-            task_type="AUTO_REPLY",
+            agent_name="dida_agent",
+            task_type="DIDA_AGENT",
             chat_type=target_chat_type,
             group_id=auto_reply_payload["group_id"],
             user_id=auto_reply_payload["user_id"],
@@ -302,7 +303,7 @@ class AutoReplyDispatcher:
                 )
                 next_allowed_at = float(state.get("next_allowed_at", 0.0) or 0.0)
                 if now < next_allowed_at:
-                    state["pending_payload"] = auto_reply_payload
+                    state["pending_payload"] = dida_agent_payload
                     previous_count = int(state.get("pending_count", 0) or 0)
                     state["pending_count"] = min(previous_count + 1, pending_max_messages)
                     if not float(state.get("pending_since", 0.0) or 0.0):
@@ -330,12 +331,12 @@ class AutoReplyDispatcher:
                     "cooldown_seconds": min_reply_interval,
                 },
             )
-            await enqueue_payload(auto_reply_payload)
+            await enqueue_payload(dida_agent_payload)
         return True
 
     async def pending_worker(self, *, enqueue_payload: Callable[[dict[str, str]], Awaitable[None]]) -> None:
         while True:
-            runtime_config = get_auto_reply_runtime_config()
+            runtime_config = get_dida_agent_runtime_config()
             check_interval = max(int(runtime_config.get("flush_check_interval_seconds", 10)), 1)
             min_interval = max(int(runtime_config.get("min_reply_interval_seconds", 300)), 0)
             pending_expire = max(int(runtime_config.get("pending_expire_seconds", 3600)), 0)
@@ -349,8 +350,8 @@ class AutoReplyDispatcher:
                         continue
 
                     pending_event = bind_agent_event(
-                        agent_name="auto_reply",
-                        task_type="AUTO_REPLY",
+                        agent_name="dida_agent",
+                        task_type="DIDA_AGENT",
                         chat_type=str(pending_payload.get("chat_type", "")),
                         group_id=str(pending_payload.get("group_id", "")),
                         user_id=str(pending_payload.get("user_id", "")),
@@ -395,11 +396,11 @@ class AutoReplyDispatcher:
             await asyncio.sleep(check_interval)
 
 
-_AUTO_REPLY_DISPATCHER = AutoReplyDispatcher()
+_DIDA_AGENT_DISPATCHER = DidaAgentDispatcher()
 
 
-def get_auto_reply_dispatcher() -> AutoReplyDispatcher:
-    return _AUTO_REPLY_DISPATCHER
+def get_dida_agent_dispatcher() -> DidaAgentDispatcher:
+    return _DIDA_AGENT_DISPATCHER
 
 
 def clean_message(raw_message: str) -> str:
@@ -463,7 +464,7 @@ def _extract_user_name(msg: GroupMessage | PrivateMessage) -> str:
     return str(getattr(msg, "user_id", "unknown_user"))
 
 
-async def _execute_auto_reply_payload(payload: dict[str, str]) -> None:
+async def _execute_dida_agent_payload(payload: dict[str, str]) -> None:
     ts = str(payload.get("ts", ""))
     chat_type = str(payload.get("chat_type", ""))
     group_id = str(payload.get("group_id", ""))
@@ -475,8 +476,8 @@ async def _execute_auto_reply_payload(payload: dict[str, str]) -> None:
     run_id = generate_run_id()
     started = perf_counter()
     log_event = bind_agent_event(
-        agent_name="auto_reply",
-        task_type="AUTO_REPLY",
+        agent_name="dida_agent",
+        task_type="DIDA_AGENT",
         run_id=run_id,
         chat_type=chat_type,
         group_id=group_id,
@@ -488,7 +489,7 @@ async def _execute_auto_reply_payload(payload: dict[str, str]) -> None:
 
     try:
         result = await submit_agent_job(
-            run_auto_reply_pipeline,
+            run_dida_agent_pipeline,
             chat_type=chat_type,
             group_id=group_id,
             user_id=user_id,
@@ -516,8 +517,23 @@ async def _execute_auto_reply_payload(payload: dict[str, str]) -> None:
         should_reply_flag = bool(result.get("should_reply", False))
         reason_text = str(result.get("reason", ""))
         reply_text = str(result.get("reply_text", "") or "").strip()
+        dida_action = result.get("dida_action")
         dida_response = ""
+        if dida_action is not None:
+            try:
+                dida_response = await dida_scheduler.execute_action(
+                    action=dida_action,
+                    chat_type=chat_type,
+                    group_id=group_id,
+                    user_id=user_id,
+                    user_name=user_name,
+                )
+            except Exception as action_error:
+                dida_response = f"⚠️ Dida 操作失败：{action_error}"
         final_reply = reply_text
+        if dida_response:
+            final_reply = f"{reply_text}\n{dida_response}".strip() if reply_text else dida_response.strip()
+
         if should_reply_flag and final_reply:
             log_event(stage="send_start", extra={"reply_length": len(final_reply)})
             try:
@@ -529,14 +545,14 @@ async def _execute_auto_reply_payload(payload: dict[str, str]) -> None:
             except Exception as send_error:
                 log_event(stage="send_error", error=str(send_error))
                 print(
-                    "[AUTO_REPLY-SEND-ERROR] "
+                    "[DIDA_AGENT-SEND-ERROR] "
                     f"chat={chat_type} group={group_id} user={user_id} error={send_error}"
                 )
         elif should_reply_flag:
             log_event(stage="send_skip", decision={"sent": False, "reason": "reply_text_empty"})
 
         print(
-            "[AUTO_REPLY] "
+            "[DIDA_AGENT] "
             f"chat={chat_type} group={group_id} user={user_name}({user_id}) "
             f"should_reply={should_reply_flag} "
             f"reason={reason_text} reply_len={len(final_reply)}"
@@ -545,33 +561,33 @@ async def _execute_auto_reply_payload(payload: dict[str, str]) -> None:
         elapsed_ms = (perf_counter() - started) * 1000
         log_event(stage="error", latency_ms=elapsed_ms, error=str(error))
         print(
-            "[AUTO_REPLY-ERROR] "
+            "[DIDA_AGENT-ERROR] "
             f"chat={chat_type} group={group_id} user={user_id} error={error}"
         )
 
 
-def _create_auto_reply_task(payload: dict[str, str]) -> None:
-    task = asyncio.create_task(_execute_auto_reply_payload(payload))
+def _create_dida_agent_task(payload: dict[str, str]) -> None:
+    task = asyncio.create_task(_execute_dida_agent_payload(payload))
 
     def _on_done(done_task: asyncio.Task) -> None:
         try:
             done_task.result()
         except Exception as error:
-            print(f"[AUTO_REPLY-ASYNC-ERROR] error={error}")
+            print(f"[DIDA_AGENT-ASYNC-ERROR] error={error}")
 
     task.add_done_callback(_on_done)
 
 
-async def _enqueue_auto_reply_payload(payload: dict[str, str]) -> None:
-    _create_auto_reply_task(payload)
+async def _enqueue_dida_agent_payload(payload: dict[str, str]) -> None:
+    _create_dida_agent_task(payload)
 
 
-async def auto_reply_pending_worker() -> None:
-    dispatcher = get_auto_reply_dispatcher()
-    await dispatcher.pending_worker(enqueue_payload=_enqueue_auto_reply_payload)
+async def dida_agent_pending_worker() -> None:
+    dispatcher = get_dida_agent_dispatcher()
+    await dispatcher.pending_worker(enqueue_payload=_enqueue_dida_agent_payload)
 
 
-async def enqueue_auto_reply_if_monitored(
+async def enqueue_dida_agent_if_monitored(
     msg: GroupMessage | PrivateMessage,
     chat_type: str,
 ) -> bool:
@@ -582,7 +598,7 @@ async def enqueue_auto_reply_if_monitored(
         else str(getattr(msg, "user_id", ""))
     )
     raw_message = getattr(msg, "raw_message", "") or ""
-    dispatcher = get_auto_reply_dispatcher()
+    dispatcher = get_dida_agent_dispatcher()
     return await dispatcher.enqueue_if_monitored(
         chat_type=target_chat_type,
         monitor_value=monitor_value,
@@ -591,7 +607,7 @@ async def enqueue_auto_reply_if_monitored(
         user_id=str(getattr(msg, "user_id", "unknown")),
         user_name=_extract_user_name(msg),
         ts=_extract_message_ts(msg),
-        enqueue_payload=_enqueue_auto_reply_payload,
+        enqueue_payload=_enqueue_dida_agent_payload,
     )
 
 
@@ -671,7 +687,7 @@ def load_recent_context_messages(
 
 
 @dataclass
-class AutoReplyMessageContext:
+class DidaAgentMessageContext:
     chat_type: str
     group_id: str
     user_id: str
@@ -683,16 +699,32 @@ class AutoReplyMessageContext:
     run_id: str = ""
 
 
-class AutoReplyAIDecision(BaseModel):
+class DidaAgentAIDecision(BaseModel):
     should_reply: bool = Field(description="是否需要回复")
     reason: str = Field(default="", description="判定理由")
 
 
-class AutoReplyGeneratedReply(BaseModel):
+class DidaAction(BaseModel):
+    action_type: Literal["create", "list", "delete", "complete", "update"] = Field(description="Dida 动作类型")
+    title: Optional[str] = Field(default=None, description="任务标题")
+    due_date: Optional[str] = Field(default=None, description="到期时间")
+    task_id: Optional[str] = Field(default=None, description="任务 ID")
+    project_id: Optional[str] = Field(default=None, description="项目 ID")
+    content: Optional[str] = Field(default=None, description="任务内容")
+    desc: Optional[str] = Field(default=None, description="任务描述")
+    is_all_day: Optional[bool] = Field(default=None, description="是否全天")
+    time_zone: Optional[str] = Field(default=None, description="时区")
+    repeat_flag: Optional[str] = Field(default=None, description="重复规则")
+    reminders: Optional[list[str]] = Field(default=None, description="提醒数组")
+    limit: Optional[int] = Field(default=None, description="列表数量")
+
+
+class DidaAgentGeneratedReply(BaseModel):
     reply_text: str = Field(default="", description="自动回复文本")
+    dida_action: Optional[DidaAction] = Field(default=None, description="Dida 动作")
 
 
-class AutoReplyAIState(TypedDict):
+class DidaAgentAIState(TypedDict):
     prompt: str
     chat_type: str
     group_id: str
@@ -706,7 +738,7 @@ class AutoReplyAIState(TypedDict):
     reason: str
 
 
-class AutoReplyGenerateState(TypedDict):
+class DidaAgentGenerateState(TypedDict):
     prompt: str
     chat_type: str
     group_id: str
@@ -717,9 +749,10 @@ class AutoReplyGenerateState(TypedDict):
     cleaned_message: str
     history_messages: list[str]
     reply_text: str
+    dida_action: Optional[DidaAction]
 
 
-class AutoReplyDecisionEngine:
+class DidaAgentDecisionEngine:
     """自动回复判定器：负责读取规则表达式并计算 should_reply。"""
 
     def __init__(self, config: dict[str, Any]):
@@ -732,10 +765,10 @@ class AutoReplyDecisionEngine:
         except (TypeError, ValueError):
             self.temperature = 0.0
 
-    def should_reply(self, context: AutoReplyMessageContext) -> dict[str, Any]:
+    def should_reply(self, context: DidaAgentMessageContext) -> dict[str, Any]:
         context_event = bind_agent_event(
-            agent_name="auto_reply",
-            task_type="AUTO_REPLY",
+            agent_name="dida_agent",
+            task_type="DIDA_AGENT",
             run_id=context.run_id,
             chat_type=context.chat_type,
             group_id=context.group_id,
@@ -870,7 +903,7 @@ class AutoReplyDecisionEngine:
                 return True, f"命中关键词: {keyword_text}"
         return False, "未命中关键词"
 
-    def condition_ai_decide(self, rule: dict[str, Any], context: AutoReplyMessageContext) -> tuple[bool, str]:
+    def condition_ai_decide(self, rule: dict[str, Any], context: DidaAgentMessageContext) -> tuple[bool, str]:
         prompt = str(rule.get("ai_decision_prompt") or "").strip()
         if not prompt:
             return False, "缺少 ai_decision_prompt"
@@ -901,9 +934,9 @@ class AutoReplyDecisionEngine:
         if base_url:
             llm_kwargs["openai_api_base"] = base_url
 
-        llm = ChatOpenAI(**llm_kwargs).with_structured_output(AutoReplyAIDecision)
+        llm = ChatOpenAI(**llm_kwargs).with_structured_output(DidaAgentAIDecision)
 
-        def decide_node(state: AutoReplyAIState) -> AutoReplyAIState:
+        def decide_node(state: DidaAgentAIState) -> DidaAgentAIState:
             llm_input = {
                 "chat_type": state["chat_type"],
                 "group_id": state["group_id"],
@@ -932,7 +965,7 @@ class AutoReplyDecisionEngine:
         graph.add_edge("decide", END)
         app = graph.compile()
         context_event = bind_agent_event(
-            agent_name="auto_reply",
+            agent_name="dida_agent",
             task_type="AUTO_REPLY",
             run_id=context.run_id,
             chat_type=context.chat_type,
@@ -978,9 +1011,45 @@ class AutoReplyDecisionEngine:
         rule: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         prompt = str(reply_prompt).strip()
+        
+        # Inject Dida task context if available
+        try:
+            context_path = os.path.join("data", "dida_context.json")
+            if os.path.exists(context_path):
+                with open(context_path, "r", encoding="utf-8") as f:
+                    dida_data = json.load(f)
+                    
+                task_context_lines = []
+                # Check for user-specific context or fallback to all
+                # The keys in dida_context.json are internal user IDs (e.g., from dida_tokens.json)
+                # Since dida_agent doesn't know the internal ID mapping easily without auth,
+                # we will include all available tasks from the context file.
+                # In a single-user/couple bot scenario, this is usually fine.
+                
+                # Only include tasks for the current user to avoid context pollution and privacy issues
+                target_uids = {str(context.user_id)}
+                # If we want to support "master" tasks management by others, we could add logic here.
+                
+                for uid, tasks in dida_data.items():
+                    if str(uid) not in target_uids:
+                        continue
+                    if not isinstance(tasks, list) or not tasks:
+                        continue
+                    for t in tasks:
+                        tid = str(t.get("id") or "")
+                        ttitle = str(t.get("title") or "")
+                        tproject = str(t.get("project") or "")
+                        tdue = str(t.get("due") or "无到期")
+                        # Format: [Project] Title (ID: ...) Due: ...
+                        task_context_lines.append(f"- [{tproject}] {ttitle} (ID: {tid}) Due: {tdue}")
+                
+                if task_context_lines:
+                    prompt += "\n\n【当前 Dida 任务列表（仅供 AI 参考，不要泄露 ID 给用户，但在调用工具时必须使用 ID）】:\n" + "\n".join(task_context_lines)
+        except Exception as e:
+            pass # Ignore context loading errors
 
         if not prompt:
-            return {"reply_text": ""}
+            return {"reply_text": "", "dida_action": None}
 
         model_name = str(rule.get("reply_model") or rule.get("model") or self.model) if rule else self.model
 
@@ -1045,6 +1114,7 @@ class AutoReplyDecisionEngine:
                 return {
                     **state,
                     "reply_text": fallback_reply or _default_reply_when_parse_failed(),
+                    "dida_action": None,
                 }
             if use_raw_fallback and isinstance(result, dict):
                 parsed = result.get("parsed")
@@ -1052,6 +1122,7 @@ class AutoReplyDecisionEngine:
                     return {
                         **state,
                         "reply_text": str(getattr(parsed, "reply_text", "") or "").strip(),
+                        "dida_action": getattr(parsed, "dida_action", None),
                     }
                 raw_output = result.get("raw")
                 fallback_reply = _extract_reply_text_from_raw_output(raw_output)
@@ -1059,37 +1130,42 @@ class AutoReplyDecisionEngine:
                     return {
                         **state,
                         "reply_text": fallback_reply,
+                        "dida_action": None,
                     }
                 parse_error = result.get("parsing_error")
                 if parse_error:
                     return {
                         **state,
                         "reply_text": _default_reply_when_parse_failed(),
+                        "dida_action": None,
                     }
                 return {
                     **state,
                     "reply_text": _default_reply_when_parse_failed(),
+                    "dida_action": None,
                 }
             structured_reply = str(getattr(result, "reply_text", "") or "").strip()
             if structured_reply:
                 return {
                     **state,
                     "reply_text": structured_reply,
+                    "dida_action": getattr(result, "dida_action", None),
                 }
             fallback_reply = _extract_reply_text_from_raw_output(result)
             return {
                 **state,
                 "reply_text": fallback_reply or _default_reply_when_parse_failed(),
+                "dida_action": None,
             }
 
-        graph = StateGraph(AutoReplyGenerateState)
+        graph = StateGraph(DidaAgentGenerateState)
         graph.add_node("generate", generate_node)
         graph.add_edge(START, "generate")
         graph.add_edge("generate", END)
         app = graph.compile()
         context_event = bind_agent_event(
-            agent_name="auto_reply",
-            task_type="AUTO_REPLY",
+            agent_name="dida_agent",
+            task_type="DIDA_AGENT",
             run_id=context.run_id,
             chat_type=context.chat_type,
             group_id=context.group_id,
@@ -1115,15 +1191,17 @@ class AutoReplyDecisionEngine:
                 "cleaned_message": context.cleaned_message,
                 "history_messages": context.history_messages,
                 "reply_text": "",
+                "dida_action": None,
             }
         )
 
         reply_text = str(final_state.get("reply_text", "")).strip()
+        dida_action = final_state.get("dida_action")
         context_event(stage="reply_generate_end", decision={"reply_length": len(reply_text), "has_reply": bool(reply_text)})
-        return {"reply_text": reply_text}
+        return {"reply_text": reply_text, "dida_action": dida_action}
 
 
-def run_auto_reply_pipeline(
+def run_dida_agent_pipeline(
     *,
     chat_type: str,
     group_id: str,
@@ -1134,8 +1212,8 @@ def run_auto_reply_pipeline(
     cleaned_message: str,
     run_id: str = "",
 ) -> dict[str, Any]:
-    """AutoReply 主处理管道：先判定，再按规则提示词生成回复文本。"""
-    runtime_config = get_auto_reply_runtime_config()
+    """DidaAgent 主处理管道：先判定，再按规则提示词生成回复文本。"""
+    runtime_config = get_dida_agent_runtime_config()
     context_limit = runtime_config["context_history_limit"]
     context_max_chars = runtime_config["context_max_chars"]
     context_window_seconds = runtime_config["context_window_seconds"]
@@ -1183,11 +1261,11 @@ def run_auto_reply_pipeline(
     )
 
     # 先判断是否要回复
-    engine = AutoReplyDecisionEngine(AUTO_REPLY_CONFIG)
+    engine = DidaAgentDecisionEngine(AUTO_REPLY_CONFIG)
     result = engine.should_reply(context)
 
     # 然后生成具体的回复内容文本
-    reply_payload: dict[str, Any] = {"reply_text": ""}
+    reply_payload: dict[str, Any] = {"reply_text": "", "dida_action": None}
     if bool(result.get("should_reply", False)):
         reply_prompt = str(result.get("reply_prompt", "")).strip()
         if reply_prompt:
@@ -1196,13 +1274,18 @@ def run_auto_reply_pipeline(
                 reply_payload = engine.generate_reply_text(reply_prompt=reply_prompt, context=context, rule=rule)
             except Exception as error:
                 context_event(stage="reply_generate_error", error=str(error))
-    
+    dida_action = reply_payload.get("dida_action")
+    rule = result.get("rule") if isinstance(result.get("rule"), dict) else {}
+    if not bool(rule.get("dida_enabled", False)):
+        dida_action = None
+        reply_payload["dida_action"] = None
     return {
         "should_reply": bool(result.get("should_reply", False)),
         "reason": str(result.get("reason", "")),
         "matched_rule": result.get("matched_rule"),
         "trigger_mode": result.get("trigger_mode", ""),
         "reply_text": str(reply_payload.get("reply_text", "") or ""),
+        "dida_action": dida_action,
         "chat_type": context.chat_type,
         "group_id": context.group_id,
         "user_id": context.user_id,
