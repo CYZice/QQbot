@@ -158,3 +158,22 @@ auto_reply_config:
         reply_prompt: |
           你是私聊助理。
           回答要直接、清晰、可执行。
+
+dida_scheduler_config:
+  file_name: dida_scheduler.py
+  config:
+    # 滴答清单/TickTick API 配置
+    # 请在 https://developer.dida365.com/manage 申请
+    client_id: ""
+    client_secret: ""
+    redirect_uri: "" # 需与申请时填写的 Redirect URL 一致，如无个人网址，可用http://www.baidu.com
+    
+    # 轮询间隔（秒）
+    poll_interval_seconds: 60
+    # 提前提醒窗口（秒），在此窗口内的任务会触发提醒
+    due_window_seconds: 60
+    # 每次扫描最大任务数
+    max_tasks_scan_per_user: 200
+    # 可选：指定监控的项目ID列表，留空则监控所有项目（包括收件箱）
+    project_ids: []
+
