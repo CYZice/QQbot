@@ -557,12 +557,19 @@ async def _execute_dida_agent_payload(payload: dict[str, str]) -> None:
             f"should_reply={should_reply_flag} "
             f"reason={reason_text} reply_len={len(final_reply)}"
         )
+    except asyncio.TimeoutError:
+        elapsed_ms = (perf_counter() - started) * 1000
+        log_event(stage="timeout", latency_ms=elapsed_ms, error="Request timed out")
+        print(
+            "[DIDA_AGENT-ERROR] "
+            f"chat={chat_type} group={group_id} user={user_id} error=TimeoutError (request took > 120s)"
+        )
     except Exception as error:
         elapsed_ms = (perf_counter() - started) * 1000
         log_event(stage="error", latency_ms=elapsed_ms, error=str(error))
         print(
             "[DIDA_AGENT-ERROR] "
-            f"chat={chat_type} group={group_id} user={user_id} error={error}"
+            f"chat={chat_type} group={group_id} user={user_id} error={repr(error)}"
         )
 
 
